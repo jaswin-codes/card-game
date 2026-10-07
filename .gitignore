@@ -1,9 +1,12 @@
 # Dependencies
 node_modules/
+.pnpm-store/
 
 # Build output
 dist/
 client/dist/
+build/
+*.tsbuildinfo
 
 # Logs
 *.log
@@ -21,3 +24,17 @@ npm-debug.log*
 
 # OneNote lock files
 *.onetoc2
+
+# Coverage / caches
+coverage/
+*.lcov
+.cache/
+.npm/
+
+# Runtime data
+pids/
+*.pid
+
+# Databases
+*.db
+*.sqlite*
