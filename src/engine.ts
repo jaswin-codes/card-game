@@ -1,0 +1,1060 @@
+import {
+  Card,
+  CardPosition,
+  CardRank,
+  CardSuit,
+  GameState,
+  Player,
+  Action,
+  ActionResponse,
+  TurnPhase,
+  ConnectionStatus
+} from './types.js';
+
+// Positions helper
+export const STARTING_POSITIONS: CardPosition[] = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
+export const PENALTY_POSITIONS: CardPosition[] = ['penalty-1', 'penalty-2', 'penalty-3', 'penalty-4'];
+
+// Helper to calculate card points
+export function getCardPoints(card: Card): number {
+  if (card.value === 'Joker') return -2;
+  if (card.value === 'A') return 1;
+  if (card.value === 'J' || card.value === 'Q') return 10;
+  if (card.value === 'K') {
+    return card.suit === 'Hearts' || card.suit === 'Diamonds' ? 0 : 10;
+  }
+  return parseInt(card.value, 10);
+}
+
+// Generate a full deck of 54 cards
+export function createDeck(): Card[] {
+  const suits: CardSuit[] = ['Hearts', 'Diamonds', 'Clubs', 'Spades'];
+  const ranks: CardRank[] = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
+  const deck: Card[] = [];
+  let idCounter = 1;
+
+  for (const suit of suits) {
+    for (const rank of ranks) {
+      deck.push({
+        id: `card-${idCounter++}`,
+        value: rank,
+        suit,
+        position: 'top-left', // default, reassigned when dealt
+        face_up: false,
+        known_by: []
+      });
+    }
+  }
+
+  // 2 Jokers
+  for (let i = 0; i < 2; i++) {
+    deck.push({
+      id: `card-${idCounter++}`,
+      value: 'Joker',
+      suit: null,
+      position: 'top-left',
+      face_up: false,
+      known_by: []
+    });
+  }
+
+  return deck;
+}
+
+// Fisher-Yates shuffle
+export function shuffleDeck(deck: Card[], randomFn = Math.random): Card[] {
+  const shuffled = [...deck];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(randomFn() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+}
+
+// Get next active player in counter-clockwise order
+export function getNextPlayerIndex(currentIndex: number, order: string[], players: Record<string, Player>): number {
+  let idx = currentIndex;
+  for (let i = 0; i < order.length; i++) {
+    idx = (idx + 1) % order.length;
+    const player = players[order[idx]];
+    if (player && player.connection_status !== 'eliminated' && !player.is_spectator) {
+      return idx;
+    }
+  }
+  return currentIndex;
+}
+
+// Reshuffle draw pile from discard pile
+export function checkAndReshuffleDrawPile(state: GameState, randomFn = Math.random): GameState {
+  if (state.draw_pile.length > 0) return state;
+
+  // Need at least one card in discard to reshuffle, and keep the top card
+  if (state.discard_pile.length <= 1) return state;
+
+  const topDiscard = state.discard_pile[state.discard_pile.length - 1];
+  const cardsToShuffle = state.discard_pile.slice(0, -1).map(c => ({
+    ...c,
+    face_up: false,
+    known_by: [] // Reset knowledge on reshuffle
+  }));
+
+  const newDrawPile = shuffleDeck(cardsToShuffle, randomFn);
+
+  return {
+    ...state,
+    draw_pile: newDrawPile,
+    discard_pile: [topDiscard]
+  };
+}
+
+// Score calculator for a player
+export function calculatePlayerScore(player: Player): number {
+  return player.cards.reduce((sum, c) => sum + getCardPoints(c), 0);
+}
+
+// Apply a mistake penalty to a player.
+// Returns state unchanged (and logs a warning) if the player ID is not found,
+// so callers always receive a valid GameState regardless of lookup failures.
+export function applyMistake(state: GameState, playerId: string, timestamp: number): GameState {
+  const rawPlayer = state.players[playerId];
+  if (!rawPlayer) {
+    // Defensive: player may have already been eliminated / removed. Do not crash.
+    console.warn(`[applyMistake] player '${playerId}' not found in state — skipping penalty`);
+    return state;
+  }
+
+  let newState = { ...state, players: { ...state.players } };
+  let player = { ...rawPlayer };
+
+  player.mistake_count += 1;
+
+  // Reshuffle if empty
+  newState = checkAndReshuffleDrawPile(newState);
+
+  if (newState.draw_pile.length === 0) {
+    // If no cards left to draw, cannot draw penalty card but still count mistake
+    newState.players[playerId] = player;
+    return newState;
+  }
+
+  // Draw penalty card
+  const penaltyCard = newState.draw_pile[0];
+  newState.draw_pile = newState.draw_pile.slice(1);
+
+  const currentCardsCount = player.cards.length;
+
+  if (currentCardsCount >= 8) {
+    // 9th card would be added -> auto-elimination
+    player.connection_status = 'eliminated';
+    player.is_spectator = true;
+    // Discard all their cards to the bottom of the discard pile
+    newState.discard_pile = [...player.cards.map(c => ({ ...c, face_up: true })), ...newState.discard_pile];
+    player.cards = [];
+    player.score = 0;
+    newState.players[playerId] = player;
+
+    // Check if game ends due to too few players
+    const activePlayers = newState.player_order.filter(id => {
+      const p = newState.players[id];
+      return p && p.connection_status !== 'eliminated' && !p.is_spectator;
+    });
+
+    if (activePlayers.length <= 1) {
+      newState.status = 'ended';
+      // Determine winners
+      let minScore = Infinity;
+      let winners: string[] = [];
+      for (const id of newState.player_order) {
+        const p = newState.players[id];
+        if (p.connection_status !== 'eliminated' && !p.is_spectator) {
+          const s = calculatePlayerScore(p);
+          if (s < minScore) {
+            minScore = s;
+            winners = [id];
+          } else if (s === minScore) {
+            winners.push(id);
+          }
+        }
+      }
+      newState.winner_ids = winners;
+    } else if (newState.player_order[newState.current_player_index] === playerId) {
+      // If the active player was eliminated, pass turn
+      newState.current_player_index = getNextPlayerIndex(newState.current_player_index, newState.player_order, newState.players);
+      newState.turn_phase = 'action_choice';
+      newState.turn_timer_start = timestamp;
+    }
+    return newState;
+  }
+
+  // Assign slot
+  const nextSlot = PENALTY_POSITIONS[currentCardsCount - 4];
+  const assignedCard: Card = {
+    ...penaltyCard,
+    position: nextSlot,
+    face_up: false,
+    known_by: []
+  };
+
+  player.cards = [...player.cards, assignedCard];
+  player.score = calculatePlayerScore(player);
+  newState.players[playerId] = player;
+
+  return newState;
+}
+
+// Initial Game Setup
+export function createInitialState(playerIds: string[], dealerId?: string, randomFn = Math.random): GameState {
+  if (playerIds.length < 2 || playerIds.length > 4) {
+    throw new Error('Player count must be between 2 and 4');
+  }
+
+  const rawDeck = createDeck();
+  const shuffled = shuffleDeck(rawDeck, randomFn);
+
+  let deckIndex = 0;
+  const players: Record<string, Player> = {};
+
+  for (const id of playerIds) {
+    const playerCards: Card[] = [];
+    for (let i = 0; i < 4; i++) {
+      const card = shuffled[deckIndex++];
+      const pos = STARTING_POSITIONS[i];
+      playerCards.push({
+        ...card,
+        position: pos,
+        known_by: i >= 2 ? [id] : [] // bottom two are known by the owner
+      });
+    }
+
+    players[id] = {
+      id,
+      name: `Player ${id}`,
+      cards: playerCards,
+      score: 0, // initially 0 or calculated
+      has_called: false,
+      mistake_count: 0,
+      connection_status: 'connected',
+      disconnect_timestamp: null,
+      is_spectator: false,
+      took_final_turn: false
+    };
+    players[id].score = calculatePlayerScore(players[id]);
+  }
+
+  const drawPile = shuffled.slice(deckIndex);
+  const discardStartCard = { ...drawPile[0], face_up: true };
+  const finalDrawPile = drawPile.slice(1);
+
+  // Winner goes first. If not provided, starting player is index 0
+  let startIndex = 0;
+  if (dealerId && playerIds.includes(dealerId)) {
+    startIndex = playerIds.indexOf(dealerId);
+  }
+
+  return {
+    players,
+    player_order: playerIds,
+    current_player_index: startIndex,
+    draw_pile: finalDrawPile,
+    discard_pile: [discardStartCard],
+    caller_id: null,
+    status: 'playing',
+    turn_phase: 'action_choice',
+    drawn_card: null,
+    last_discard_card: discardStartCard,
+    last_discard_player_id: null,
+    jump_in_window_open: true,
+    active_power: null,
+    turn_timer_start: null,
+    winner_ids: []
+  };
+}
+
+// Reducer State Transition Function
+export function transition(state: GameState, action: Action, timestamp: number, randomFn = Math.random): ActionResponse {
+  if (!action || typeof action.type !== 'string') {
+    return { state, success: false, error: 'Invalid action' };
+  }
+
+  const result = runAction(state, action, timestamp, randomFn);
+
+  // Immutability contract: a returned state must never share its players map
+  // object with the input state, so callers can safely persist/compare either.
+  if (result.state !== state && result.state.players === state.players) {
+    return { ...result, state: { ...result.state, players: { ...result.state.players } } };
+  }
+  return result;
+}
+
+function runAction(state: GameState, action: Action, timestamp: number, randomFn: () => number): ActionResponse {
+  if (state.status === 'ended' && action.type !== 'START_GAME') {
+    return { state, success: false, error: 'Game has ended' };
+  }
+
+  switch (action.type) {
+    case 'START_GAME': {
+      try {
+        const nextState = createInitialState(action.player_ids, action.dealer_id, randomFn);
+        nextState.turn_timer_start = action.timestamp;
+        return { state: nextState, success: true };
+      } catch (err: any) {
+        return { state, success: false, error: err.message };
+      }
+    }
+
+    case 'LOOK_BOTTOM_CARDS': {
+      const player = state.players[action.player_id];
+      if (!player || player.is_spectator) {
+        return { state, success: false, error: 'Invalid player' };
+      }
+      // Add player to bottom cards knowledge
+      const nextPlayers = { ...state.players };
+      const nextCards = player.cards.map(c => {
+        if (c.position === 'bottom-left' || c.position === 'bottom-right') {
+          if (!c.known_by.includes(action.player_id)) {
+            return { ...c, known_by: [...c.known_by, action.player_id] };
+          }
+        }
+        return c;
+      });
+      nextPlayers[action.player_id] = { ...player, cards: nextCards };
+      return { state: { ...state, players: nextPlayers }, success: true };
+    }
+
+    case 'DRAW_PILE_DRAW': {
+      const activePlayerId = state.player_order[state.current_player_index];
+      if (action.player_id !== activePlayerId) {
+        // Skipping turn/playing out of order mistake
+        const nextState = applyMistake(state, action.player_id, timestamp);
+        return { state: nextState, success: false, error: 'Skipped turn / out of order action' };
+      }
+
+      if (state.turn_phase !== 'action_choice') {
+        return { state, success: false, error: 'Cannot draw card in this phase' };
+      }
+
+      // Check draw pile exhaustion
+      let nextState = checkAndReshuffleDrawPile(state, randomFn);
+      if (nextState.draw_pile.length === 0) {
+        return { state: nextState, success: false, error: 'Draw pile is empty' };
+      }
+
+      const drawn = nextState.draw_pile[0];
+      const drawnWithKnowledge = { ...drawn, known_by: [action.player_id] }; // Drawer gets to see it
+
+      return {
+        state: {
+          ...nextState,
+          draw_pile: nextState.draw_pile.slice(1),
+          drawn_card: drawnWithKnowledge,
+          turn_phase: 'draw_decide',
+          jump_in_window_open: false // closing previous discard window once turn progresses
+        },
+        success: true
+      };
+    }
+
+    case 'DRAW_PILE_KEEP': {
+      const activePlayerId = state.player_order[state.current_player_index];
+      if (action.player_id !== activePlayerId) {
+        const nextState = applyMistake(state, action.player_id, timestamp);
+        return { state: nextState, success: false, error: 'Out of order action' };
+      }
+
+      if (state.turn_phase !== 'draw_decide' || !state.drawn_card) {
+        return { state, success: false, error: 'No drawn card to swap' };
+      }
+
+      const player = state.players[action.player_id];
+      const targetCard = player.cards.find(c => c.position === action.target_position);
+      if (!targetCard) {
+        return { state, success: false, error: 'Target position not found' };
+      }
+
+      // Cannot interact with caller or already-finished players' cards if final round
+      if (state.status === 'final_round') {
+        if (state.caller_id === action.player_id || player.took_final_turn) {
+          // Can interact with own cards but let's double check if player is already finished
+          return { state, success: false, error: 'Already took final turn' };
+        }
+      }
+
+      // Swap
+      const discardedCard = { ...targetCard, face_up: true, position: 'top-left' as CardPosition };
+      const newCardInGrid = { ...state.drawn_card, position: action.target_position };
+
+      const nextCards = player.cards.map(c => (c.position === action.target_position ? newCardInGrid : c));
+      const nextPlayer = { ...player, cards: nextCards };
+      nextPlayer.score = calculatePlayerScore(nextPlayer);
+
+      const nextPlayers = { ...state.players, [action.player_id]: nextPlayer };
+
+      let nextGameState: GameState = {
+        ...state,
+        players: nextPlayers,
+        discard_pile: [...state.discard_pile, discardedCard],
+        drawn_card: null,
+        last_discard_card: discardedCard,
+        last_discard_player_id: action.player_id,
+        jump_in_window_open: true
+      };
+
+      return completeTurn(nextGameState, action.player_id, timestamp);
+    }
+
+    case 'DRAW_PILE_DISCARD': {
+      const activePlayerId = state.player_order[state.current_player_index];
+      if (action.player_id !== activePlayerId) {
+        const nextState = applyMistake(state, action.player_id, timestamp);
+        return { state: nextState, success: false, error: 'Out of order action' };
+      }
+
+      if (state.turn_phase !== 'draw_decide' || !state.drawn_card) {
+        return { state, success: false, error: 'No drawn card to discard' };
+      }
+
+      const discarded = { ...state.drawn_card, face_up: true };
+
+      // Check if it has power
+      const hasPower = ['7', '8', '9', '10', 'J', 'Q', 'K'].includes(discarded.value);
+
+      let nextGameState: GameState = {
+        ...state,
+        discard_pile: [...state.discard_pile, discarded],
+        drawn_card: null,
+        last_discard_card: discarded,
+        last_discard_player_id: action.player_id,
+        jump_in_window_open: true
+      };
+
+      if (hasPower) {
+        let pType: '7_8' | '9_10' | 'J_Q' | 'K' = '7_8';
+        if (discarded.value === '7' || discarded.value === '8') pType = '7_8';
+        else if (discarded.value === '9' || discarded.value === '10') pType = '9_10';
+        else if (discarded.value === 'J' || discarded.value === 'Q') pType = 'J_Q';
+        else if (discarded.value === 'K') pType = 'K';
+
+        nextGameState.turn_phase = 'resolving_power';
+        nextGameState.active_power = {
+          card_id: discarded.id,
+          power_type: pType,
+          player_id: action.player_id,
+          timer_start: timestamp
+        };
+        return { state: nextGameState, success: true };
+      } else {
+        return completeTurn(nextGameState, action.player_id, timestamp);
+      }
+    }
+
+    case 'TAKE_DISCARD_SWAP': {
+      const activePlayerId = state.player_order[state.current_player_index];
+      if (action.player_id !== activePlayerId) {
+        const nextState = applyMistake(state, action.player_id, timestamp);
+        return { state: nextState, success: false, error: 'Out of order action' };
+      }
+
+      if (state.turn_phase !== 'action_choice') {
+        return { state, success: false, error: 'Cannot take discard in this phase' };
+      }
+
+      if (state.discard_pile.length === 0) {
+        return { state, success: false, error: 'Discard pile is empty' };
+      }
+
+      const player = state.players[action.player_id];
+      const targetCard = player.cards.find(c => c.position === action.target_position);
+      if (!targetCard) {
+        return { state, success: false, error: 'Target position not found' };
+      }
+
+      const takenCard = state.discard_pile[state.discard_pile.length - 1];
+      const discardedCard = { ...targetCard, face_up: true, position: 'top-left' as CardPosition };
+
+      // Swap
+      const newCardInGrid = {
+        ...takenCard,
+        position: action.target_position,
+        face_up: false, // goes face down
+        known_by: [action.player_id] // the active player and everyone knows (since it was taken from public discard)
+      };
+
+      // Add to known_by for everyone? The spec says "Everyone can see which card you took and where you placed it"
+      // So everyone knows this card.
+      newCardInGrid.known_by = Object.keys(state.players);
+
+      const nextCards = player.cards.map(c => (c.position === action.target_position ? newCardInGrid : c));
+      const nextPlayer = { ...player, cards: nextCards };
+      nextPlayer.score = calculatePlayerScore(nextPlayer);
+
+      const nextPlayers = { ...state.players, [action.player_id]: nextPlayer };
+
+      let nextGameState: GameState = {
+        ...state,
+        players: nextPlayers,
+        discard_pile: [...state.discard_pile.slice(0, -1), discardedCard],
+        last_discard_card: discardedCard,
+        last_discard_player_id: action.player_id,
+        jump_in_window_open: true
+      };
+
+      return completeTurn(nextGameState, action.player_id, timestamp);
+    }
+
+    case 'RESOLVE_POWER_7_8': {
+      if (!state.active_power || state.active_power.power_type !== '7_8' || state.active_power.player_id !== action.player_id) {
+        const nextState = applyMistake(state, action.player_id, timestamp);
+        return { state: nextState, success: false, error: 'Wrong power usage' };
+      }
+
+      const player = state.players[action.player_id];
+      const targetCard = player.cards.find(c => c.position === action.target_position);
+      if (!targetCard) {
+        return { state, success: false, error: 'Card position not found' };
+      }
+
+      // Add to known_by
+      const nextCards = player.cards.map(c => {
+        if (c.position === action.target_position) {
+          return { ...c, known_by: Array.from(new Set([...c.known_by, action.player_id])) };
+        }
+        return c;
+      });
+
+      const nextPlayer = { ...player, cards: nextCards };
+      const nextPlayers = { ...state.players, [action.player_id]: nextPlayer };
+
+      let nextGameState: GameState = {
+        ...state,
+        players: nextPlayers,
+        active_power: null,
+        turn_phase: 'action_choice'
+      };
+
+      return completeTurn(nextGameState, action.player_id, timestamp);
+    }
+
+    case 'RESOLVE_POWER_9_10': {
+      if (!state.active_power || state.active_power.power_type !== '9_10' || state.active_power.player_id !== action.player_id) {
+        const nextState = applyMistake(state, action.player_id, timestamp);
+        return { state: nextState, success: false, error: 'Wrong power usage' };
+      }
+
+      if (action.target_player_id === action.player_id) {
+        return { state, success: false, error: 'Cannot target yourself with 9/10' };
+      }
+
+      // Restriction: cannot interact with caller's cards or finished players' cards in final round
+      if (state.status === 'final_round') {
+        const targetP = state.players[action.target_player_id];
+        if (action.target_player_id === state.caller_id || (targetP && targetP.took_final_turn)) {
+          return { state, success: false, error: 'Cannot interact with caller or finished player cards' };
+        }
+      }
+
+      const targetPlayer = state.players[action.target_player_id];
+      if (!targetPlayer) {
+        return { state, success: false, error: 'Target player not found' };
+      }
+
+      const targetCard = targetPlayer.cards.find(c => c.position === action.target_position);
+      if (!targetCard) {
+        return { state, success: false, error: 'Card position not found' };
+      }
+
+      // Add to known_by
+      const nextCards = targetPlayer.cards.map(c => {
+        if (c.position === action.target_position) {
+          return { ...c, known_by: Array.from(new Set([...c.known_by, action.player_id])) };
+        }
+        return c;
+      });
+
+      const nextPlayers = {
+        ...state.players,
+        [action.target_player_id]: { ...targetPlayer, cards: nextCards }
+      };
+
+      let nextGameState: GameState = {
+        ...state,
+        players: nextPlayers,
+        active_power: null,
+        turn_phase: 'action_choice'
+      };
+
+      return completeTurn(nextGameState, action.player_id, timestamp);
+    }
+
+    case 'RESOLVE_POWER_J_Q': {
+      if (!state.active_power || state.active_power.power_type !== 'J_Q' || state.active_power.player_id !== action.player_id) {
+        const nextState = applyMistake(state, action.player_id, timestamp);
+        return { state: nextState, success: false, error: 'Wrong power usage' };
+      }
+
+      if (action.opponent_player_id === action.player_id) {
+        return { state, success: false, error: 'Cannot target yourself' };
+      }
+
+      if (state.status === 'final_round') {
+        const opp = state.players[action.opponent_player_id];
+        if (action.opponent_player_id === state.caller_id || (opp && opp.took_final_turn)) {
+          return { state, success: false, error: 'Cannot interact with finished player' };
+        }
+      }
+
+      const ownPlayer = state.players[action.player_id];
+      const oppPlayer = state.players[action.opponent_player_id];
+      if (!ownPlayer || !oppPlayer) {
+        return { state, success: false, error: 'Players not found' };
+      }
+
+      const ownCard = ownPlayer.cards.find(c => c.position === action.own_position);
+      const oppCard = oppPlayer.cards.find(c => c.position === action.opponent_position);
+      if (!ownCard || !oppCard) {
+        return { state, success: false, error: 'Card position not found' };
+      }
+
+      // Swap
+      const nextOwnCards = ownPlayer.cards.map(c => {
+        if (c.position === action.own_position) {
+          return { ...oppCard, position: action.own_position };
+        }
+        return c;
+      });
+
+      const nextOppCards = oppPlayer.cards.map(c => {
+        if (c.position === action.opponent_position) {
+          return { ...ownCard, position: action.opponent_position };
+        }
+        return c;
+      });
+
+      const nextPlayers = {
+        ...state.players,
+        [action.player_id]: {
+          ...ownPlayer,
+          cards: nextOwnCards,
+          score: ownPlayer.cards.reduce((sum, c) => sum + getCardPoints(c), 0) // recalculate below
+        },
+        [action.opponent_player_id]: {
+          ...oppPlayer,
+          cards: nextOppCards,
+          score: oppPlayer.cards.reduce((sum, c) => sum + getCardPoints(c), 0)
+        }
+      };
+
+      nextPlayers[action.player_id].score = calculatePlayerScore(nextPlayers[action.player_id]);
+      nextPlayers[action.opponent_player_id].score = calculatePlayerScore(nextPlayers[action.opponent_player_id]);
+
+      let nextGameState: GameState = {
+        ...state,
+        players: nextPlayers,
+        active_power: null,
+        turn_phase: 'action_choice'
+      };
+
+      return completeTurn(nextGameState, action.player_id, timestamp);
+    }
+
+    case 'RESOLVE_POWER_K': {
+      if (!state.active_power || state.active_power.power_type !== 'K' || state.active_power.player_id !== action.player_id) {
+        const nextState = applyMistake(state, action.player_id, timestamp);
+        return { state: nextState, success: false, error: 'Wrong power usage' };
+      }
+
+      if (action.opponent_player_id === action.player_id) {
+        return { state, success: false, error: 'Cannot target yourself' };
+      }
+
+      if (state.status === 'final_round') {
+        const opp = state.players[action.opponent_player_id];
+        if (action.opponent_player_id === state.caller_id || (opp && opp.took_final_turn)) {
+          return { state, success: false, error: 'Cannot interact with finished player' };
+        }
+      }
+
+      const ownPlayer = state.players[action.player_id];
+      const oppPlayer = state.players[action.opponent_player_id];
+      if (!ownPlayer || !oppPlayer) {
+        return { state, success: false, error: 'Players not found' };
+      }
+
+      const ownCard = ownPlayer.cards.find(c => c.position === action.own_position);
+      const oppCard = oppPlayer.cards.find(c => c.position === action.opponent_position);
+      if (!ownCard || !oppCard) {
+        return { state, success: false, error: 'Card position not found' };
+      }
+
+      // Add to known_by of both cards
+      const ownCardWithKnowledge = {
+        ...ownCard,
+        known_by: Array.from(new Set([...ownCard.known_by, action.player_id]))
+      };
+      const oppCardWithKnowledge = {
+        ...oppCard,
+        known_by: Array.from(new Set([...oppCard.known_by, action.player_id]))
+      };
+
+      let nextOwnCards = ownPlayer.cards.map(c => (c.position === action.own_position ? ownCardWithKnowledge : c));
+      let nextOppCards = oppPlayer.cards.map(c => (c.position === action.opponent_position ? oppCardWithKnowledge : c));
+
+      if (action.should_swap) {
+        // Swap
+        nextOwnCards = ownPlayer.cards.map(c => {
+          if (c.position === action.own_position) {
+            return { ...oppCardWithKnowledge, position: action.own_position };
+          }
+          return c;
+        });
+        nextOppCards = oppPlayer.cards.map(c => {
+          if (c.position === action.opponent_position) {
+            return { ...ownCardWithKnowledge, position: action.opponent_position };
+          }
+          return c;
+        });
+      }
+
+      const nextPlayers = {
+        ...state.players,
+        [action.player_id]: {
+          ...ownPlayer,
+          cards: nextOwnCards,
+          score: 0
+        },
+        [action.opponent_player_id]: {
+          ...oppPlayer,
+          cards: nextOppCards,
+          score: 0
+        }
+      };
+
+      nextPlayers[action.player_id].score = calculatePlayerScore(nextPlayers[action.player_id]);
+      nextPlayers[action.opponent_player_id].score = calculatePlayerScore(nextPlayers[action.opponent_player_id]);
+
+      let nextGameState: GameState = {
+        ...state,
+        players: nextPlayers,
+        active_power: null,
+        turn_phase: 'action_choice'
+      };
+
+      return completeTurn(nextGameState, action.player_id, timestamp);
+    }
+
+    case 'JUMP_IN_TYPE_1': {
+      if (!state.jump_in_window_open || !state.last_discard_card) {
+        return { state, success: false, error: 'Jump-in window is closed' };
+      }
+
+      // Check final round restriction: cannot jump-in from finished player's cards
+      if (state.status === 'final_round') {
+        const jumper = state.players[action.player_id];
+        if (action.player_id === state.caller_id || (jumper && jumper.took_final_turn)) {
+          return { state, success: false, error: 'Already took final turn / cannot jump in' };
+        }
+      }
+
+      const player = state.players[action.player_id];
+      if (!player || player.is_spectator) {
+        return { state, success: false, error: 'Invalid player' };
+      }
+
+      const card = player.cards.find(c => c.position === action.card_position);
+      if (!card) {
+        return { state, success: false, error: 'Card not found' };
+      }
+
+      // King matching checks
+      const isKingMatch = card.value === 'K' && state.last_discard_card.value === 'K';
+      const ranksMatch = card.value === state.last_discard_card.value;
+
+      if (ranksMatch || isKingMatch) {
+        // Valid jump-in
+        const discarded = { ...card, face_up: true, position: 'top-left' as CardPosition };
+        const nextCards = player.cards.filter(c => c.position !== action.card_position);
+
+        const nextPlayer = { ...player, cards: nextCards };
+        nextPlayer.score = calculatePlayerScore(nextPlayer);
+
+        const nextPlayers = { ...state.players, [action.player_id]: nextPlayer };
+
+        let nextGameState = {
+          ...state,
+          players: nextPlayers,
+          discard_pile: [...state.discard_pile, discarded],
+          last_discard_card: discarded,
+          last_discard_player_id: action.player_id,
+          jump_in_window_open: true // window remains open for new discard
+        };
+
+        return { state: nextGameState, success: true };
+      } else {
+        // Wrong jump-in number mistake
+        const nextState = applyMistake(state, action.player_id, timestamp);
+        return { state: nextState, success: false, error: 'Wrong jump-in number' };
+      }
+    }
+
+    case 'JUMP_IN_TYPE_2': {
+      if (!state.jump_in_window_open || !state.last_discard_card) {
+        return { state, success: false, error: 'Jump-in window is closed' };
+      }
+
+      if (action.opponent_player_id === action.player_id) {
+        return { state, success: false, error: 'Cannot use Type 2 jump-in on yourself' };
+      }
+
+      // Check final round restrictions
+      if (state.status === 'final_round') {
+        const jumper = state.players[action.player_id];
+        const opponent = state.players[action.opponent_player_id];
+        if (action.player_id === state.caller_id || (jumper && jumper.took_final_turn)) {
+          return { state, success: false, error: 'Already took final turn / cannot jump in' };
+        }
+        if (action.opponent_player_id === state.caller_id || (opponent && opponent.took_final_turn)) {
+          return { state, success: false, error: 'Cannot interact with caller or finished player' };
+        }
+      }
+
+      const jumper = state.players[action.player_id];
+      const opponent = state.players[action.opponent_player_id];
+      if (!jumper || !opponent || jumper.is_spectator || opponent.is_spectator) {
+        return { state, success: false, error: 'Player not found' };
+      }
+
+      const oppCard = opponent.cards.find(c => c.position === action.opponent_position);
+      const ownCard = jumper.cards.find(c => c.position === action.own_position);
+      if (!oppCard || !ownCard) {
+        return { state, success: false, error: 'Card not found' };
+      }
+
+      // Check if jumper has seen the opponent's card (prior knowledge)
+      const hasPriorKnowledge = oppCard.known_by.includes(action.player_id);
+      if (!hasPriorKnowledge) {
+        // Mistake: illegal peeking / wrong jump-in / knowledge requirement not met
+        const nextState = applyMistake(state, action.player_id, timestamp);
+        return { state: nextState, success: false, error: 'No prior knowledge of opponent card' };
+      }
+
+      const isKingMatch = oppCard.value === 'K' && state.last_discard_card.value === 'K';
+      const ranksMatch = oppCard.value === state.last_discard_card.value;
+
+      if (ranksMatch || isKingMatch) {
+        // Valid jump-in: discard opponent's card, give opponent own card
+        const discarded = { ...oppCard, face_up: true, position: 'top-left' as CardPosition };
+
+        // Opponent loses their matching card, gets the ownCard face-down
+        const nextOppCards = opponent.cards
+          .filter(c => c.position !== action.opponent_position)
+          .concat({
+            ...ownCard,
+            position: action.opponent_position,
+            face_up: false,
+            known_by: [] // Knowledge reset for opponent card
+          });
+
+        // Jumper loses ownCard
+        const nextOwnCards = jumper.cards.filter(c => c.position !== action.own_position);
+
+        const nextJumper = { ...jumper, cards: nextOwnCards };
+        nextJumper.score = calculatePlayerScore(nextJumper);
+
+        const nextOpponent = { ...opponent, cards: nextOppCards };
+        nextOpponent.score = calculatePlayerScore(nextOpponent);
+
+        const nextPlayers = {
+          ...state.players,
+          [action.player_id]: nextJumper,
+          [action.opponent_player_id]: nextOpponent
+        };
+
+        let nextGameState = {
+          ...state,
+          players: nextPlayers,
+          discard_pile: [...state.discard_pile, discarded],
+          last_discard_card: discarded,
+          last_discard_player_id: action.player_id,
+          jump_in_window_open: true
+        };
+
+        return { state: nextGameState, success: true };
+      } else {
+        // Wrong matching number
+        const nextState = applyMistake(state, action.player_id, timestamp);
+        return { state: nextState, success: false, error: 'Wrong jump-in card rank' };
+      }
+    }
+
+    case 'CALL': {
+      const activePlayerId = state.player_order[state.current_player_index];
+      if (action.player_id !== activePlayerId) {
+        const nextState = applyMistake(state, action.player_id, timestamp);
+        return { state: nextState, success: false, error: 'Cannot call out of order' };
+      }
+
+      if (state.turn_phase !== 'action_choice') {
+        return { state, success: false, error: 'Can only call at start of turn' };
+      }
+
+      if (state.caller_id !== null) {
+        return { state, success: false, error: 'Round has already been called' };
+      }
+
+      // Set caller and transition to final round
+      const caller = { ...state.players[action.player_id], has_called: true };
+      const nextPlayers = { ...state.players, [action.player_id]: caller };
+
+      let nextGameState: GameState = {
+        ...state,
+        players: nextPlayers,
+        caller_id: action.player_id,
+        status: 'final_round'
+      };
+
+      // Since calling ends the turn, proceed
+      return completeTurn(nextGameState, action.player_id, timestamp);
+    }
+
+    case 'DISCONNECT': {
+      const player = state.players[action.player_id];
+      if (!player) return { state, success: false, error: 'Player not found' };
+
+      const nextPlayers = {
+        ...state.players,
+        [action.player_id]: {
+          ...player,
+          connection_status: 'disconnected' as ConnectionStatus,
+          disconnect_timestamp: action.timestamp
+        }
+      };
+
+      return { state: { ...state, players: nextPlayers }, success: true };
+    }
+
+    case 'RECONNECT': {
+      const player = state.players[action.player_id];
+      if (!player) return { state, success: false, error: 'Player not found' };
+      if (player.connection_status === 'eliminated') {
+        return { state, success: false, error: 'Player is eliminated' };
+      }
+
+      const nextPlayers = {
+        ...state.players,
+        [action.player_id]: {
+          ...player,
+          connection_status: 'connected' as ConnectionStatus,
+          disconnect_timestamp: null
+        }
+      };
+
+      return { state: { ...state, players: nextPlayers }, success: true };
+    }
+
+    case 'FORCE_MISTAKE': {
+      const nextState = applyMistake(state, action.player_id, timestamp);
+      return { state: nextState, success: true };
+    }
+
+    case 'FORCE_TIMER_EXPIRY': {
+      // Handle turn timer expiry (30s) or power activation timer expiry (30s)
+      if (state.active_power) {
+        // Power forfeited
+        const activePlayerId = state.active_power.player_id;
+        let nextGameState: GameState = {
+          ...state,
+          active_power: null,
+          turn_phase: 'action_choice'
+        };
+        return completeTurn(nextGameState, activePlayerId, timestamp);
+      } else {
+        // Turn timer expired: active player gets a penalty card and turn is passed
+        const activePlayerId = state.player_order[state.current_player_index];
+        let nextGameState = applyMistake(state, activePlayerId, timestamp);
+        // Pass turn if not ended
+        if (nextGameState.status !== 'ended') {
+          nextGameState.current_player_index = getNextPlayerIndex(
+            nextGameState.current_player_index,
+            nextGameState.player_order,
+            nextGameState.players
+          );
+          nextGameState.turn_phase = 'action_choice';
+          nextGameState.turn_timer_start = timestamp;
+        }
+        return { state: nextGameState, success: true };
+      }
+    }
+
+    default:
+      return { state, success: false, error: 'Unknown action' };
+  }
+}
+
+// Complete the active turn and advance logic
+function completeTurn(state: GameState, playerId: string, timestamp: number): ActionResponse {
+  // Deep-clone the players map so we never mutate the input state in-place.
+  let nextState: GameState = { ...state, players: { ...state.players } };
+
+  if (nextState.status === 'final_round') {
+    // Mark took_final_turn — only if the player actually exists and hasn't been eliminated
+    if (playerId !== nextState.caller_id && nextState.players[playerId]) {
+      nextState.players[playerId] = { ...nextState.players[playerId], took_final_turn: true };
+    }
+
+    // Check if everyone has taken their final turn
+    const otherPlayers = nextState.player_order.filter(id => id !== nextState.caller_id);
+    const allFinished = otherPlayers.every(id => {
+      const p = nextState.players[id];
+      return !p || p.connection_status === 'eliminated' || p.is_spectator || p.took_final_turn;
+    });
+
+    if (allFinished) {
+      nextState.status = 'ended';
+      // Flip all cards face up (replace player objects — never mutate shared ones)
+      for (const id of nextState.player_order) {
+        const p = nextState.players[id];
+        nextState.players[id] = {
+          ...p,
+          cards: p.cards.map(c => ({ ...c, face_up: true })),
+          score: calculatePlayerScore(p)
+        };
+      }
+
+      // Calculate winners
+      let minScore = Infinity;
+      let candidates: string[] = [];
+
+      for (const id of nextState.player_order) {
+        const p = nextState.players[id];
+        if (p.connection_status !== 'eliminated' && !p.is_spectator) {
+          const s = calculatePlayerScore(p);
+          if (s < minScore) {
+            minScore = s;
+            candidates = [id];
+          } else if (s === minScore) {
+            candidates.push(id);
+          }
+        }
+      }
+
+      // Tiebreaker rule: If caller is among the tied lowest scorers, caller wins solely
+      if (nextState.caller_id && candidates.includes(nextState.caller_id)) {
+        nextState.winner_ids = [nextState.caller_id];
+      } else {
+        nextState.winner_ids = candidates;
+      }
+
+      return { state: nextState, success: true };
+    }
+  }
+
+  // Advance turn to next active player
+  nextState.current_player_index = getNextPlayerIndex(
+    nextState.current_player_index,
+    nextState.player_order,
+    nextState.players
+  );
+  nextState.turn_phase = 'action_choice';
+  nextState.turn_timer_start = timestamp;
+
+  return { state: nextState, success: true };
+}
