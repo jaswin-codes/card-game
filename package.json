@@ -1,0 +1,28 @@
+{
+  "name": "card_game",
+  "version": "1.0.0",
+  "description": "Core game engine for card game",
+  "main": "dist/src/engine.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "build:client": "npm --prefix client run build",
+    "build:all": "npm run build && npm run build:client",
+    "test": "vitest run",
+    "start": "npm run build && node dist/src/server.js",
+    "dev:server": "node --watch dist/src/server.js",
+    "dev:client": "npm --prefix client run dev"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0",
+    "ts-node": "^10.9.1",
+    "@types/ws": "^8.5.10"
+  }
+}
