@@ -36,6 +36,22 @@ interface Room {
   reconnectTimers: Record<string, NodeJS.Timeout>;
 }
 
+// Actions a client may send; setup, timer and connection actions are server-only
+const CLIENT_ACTION_TYPES = new Set<string>([
+  'LOOK_BOTTOM_CARDS',
+  'DRAW_PILE_DRAW',
+  'DRAW_PILE_KEEP',
+  'DRAW_PILE_DISCARD',
+  'TAKE_DISCARD_SWAP',
+  'RESOLVE_POWER_7_8',
+  'RESOLVE_POWER_9_10',
+  'RESOLVE_POWER_J_Q',
+  'RESOLVE_POWER_K',
+  'JUMP_IN_TYPE_1',
+  'JUMP_IN_TYPE_2',
+  'CALL'
+]);
+
 const rooms: Record<string, Room> = {};
 const sessions: Record<string, Session> = {}; // token -> Session
 
@@ -157,7 +173,10 @@ function broadcastRoomState(room: Room) {
         JSON.stringify({
           type: 'GAME_STATE_UPDATE',
           gameState: masked,
-          status: room.gameState?.status || 'setup'
+          status: room.gameState?.status || 'setup',
+          // Lobby info so everyone sees joins/leaves before the game starts
+          players: room.players.map(p => ({ id: p.playerId, name: p.name })),
+          hostId: room.players[0]?.playerId ?? null
         })
       );
     }
@@ -331,15 +350,24 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
         return;
       }
 
+      if (room.gameState && room.gameState.status !== 'ended') {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'Game already in progress' }));
+        return;
+      }
+
       if (room.players.length < 2) {
         ws.send(JSON.stringify({ type: 'ERROR', error: 'Need at least 2 players to start' }));
         return;
       }
 
       const playerIds = room.players.map(p => p.playerId);
-      // Setup engine initial state
-      room.gameState = createInitialState(playerIds);
+      // Winner of the previous game goes first
+      const previousWinner = room.gameState?.winner_ids[0];
+      room.gameState = createInitialState(playerIds, previousWinner);
       room.gameState.turn_timer_start = timestamp;
+      for (const p of room.players) {
+        room.gameState.players[p.playerId].name = p.name;
+      }
 
       ws.send(JSON.stringify({ type: 'GAME_STARTED', roomId: room.id }));
       broadcastRoomState(room);
@@ -360,39 +388,38 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
         return;
       }
 
-      const action: Action = message.action;
-      // Server-side validation: Force the action playerId to match session playerId
-      if (action && typeof action === 'object' && 'player_id' in action) {
-        (action as any).player_id = session.playerId;
-      }
-
-      // Handle race condition check for jump-ins
-      if (action.type === 'JUMP_IN_TYPE_1' || action.type === 'JUMP_IN_TYPE_2') {
-        if (!room.gameState.jump_in_window_open) {
-          ws.send(JSON.stringify({ type: 'ERROR', error: 'Jump-in window is closed' }));
-          return;
-        }
-      }
-
-      const result = transition(room.gameState, action, timestamp);
-      if (!result.success) {
-        console.log('[DEBUG GAME_ACTION] session=', session.playerId, 'action.player_id=', (action as any).player_id, 'active=', room.gameState.player_order[room.gameState.current_player_index], 'idx=', room.gameState.current_player_index, 'error=', result.error);
-        ws.send(JSON.stringify({ type: 'ACTION_FAILED', error: result.error }));
-        // Still broadcast state because mistake penalty might have been applied
-        broadcastRoomState(room);
+      const raw = message.action;
+      if (!raw || typeof raw !== 'object' || !CLIENT_ACTION_TYPES.has(raw.type)) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'Invalid game action' }));
         return;
       }
+      // Server-side validation: the acting player is always the session's player
+      const action = { ...raw, player_id: session.playerId, timestamp } as Action;
 
+      const prevState = room.gameState;
+      const result = transition(prevState, action, timestamp);
+      // Persist even on failure: a mistake penalty may have been applied
       room.gameState = result.state;
 
-      // Timer updates based on phase transitions
+      if (!result.success) {
+        ws.send(JSON.stringify({ type: 'ACTION_FAILED', error: result.error }));
+      }
+
+      // Timers only restart when the turn or phase actually moves on, so
+      // out-of-turn jump-ins don't reset the active player's clock.
+      const turnMoved =
+        room.gameState.current_player_index !== prevState.current_player_index ||
+        room.gameState.turn_phase !== prevState.turn_phase;
       if (room.gameState.status === 'ended') {
         if (room.turnTimer) clearTimeout(room.turnTimer);
         if (room.powerTimer) clearTimeout(room.powerTimer);
-      } else if (room.gameState.turn_phase === 'resolving_power') {
-        startPowerTimer(room);
-      } else {
-        startTurnTimer(room);
+      } else if (turnMoved) {
+        room.gameState = { ...room.gameState, turn_timer_start: timestamp };
+        if (room.gameState.turn_phase === 'resolving_power') {
+          startPowerTimer(room);
+        } else {
+          startTurnTimer(room);
+        }
       }
 
       broadcastRoomState(room);
@@ -405,8 +432,17 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
       const session = sessions[token];
 
       if (!room || !session || session.playerId !== playerId) {
-        ws.send(JSON.stringify({ type: 'ERROR', error: 'Invalid reconnection parameters' }));
+        ws.send(JSON.stringify({ type: 'RECONNECT_FAILED', error: 'Session expired — please join again' }));
         return;
+      }
+
+      // A lobby player who dropped (e.g. page refresh) gets their seat back
+      if (!room.gameState && !session.isSpectator && !room.players.includes(session)) {
+        if (room.players.length >= 4) {
+          ws.send(JSON.stringify({ type: 'RECONNECT_FAILED', error: 'Lobby is full' }));
+          return;
+        }
+        room.players.push(session);
       }
 
       // Clear reconnect timer
@@ -494,17 +530,22 @@ function handleDisconnect(clientSession: { session: Session | null }) {
         let nextGameState: GameState = {
           ...gameState,
           players: { ...gameState.players, [session.playerId]: eliminatedPlayer },
-          // Move their cards face-up onto the discard pile
+          // Move their cards face-up to the bottom of the discard pile (top card stays in play)
           discard_pile: [
-            ...gameState.discard_pile,
-            ...player.cards.map(c => ({ ...c, face_up: true }))
+            ...player.cards.map(c => ({ ...c, face_up: true })),
+            ...gameState.discard_pile
           ]
         };
 
-        // Pass turn if they were the active player
+        // Pass turn if they were the active player (engine skips the penalty for eliminated players)
         if (nextGameState.player_order[nextGameState.current_player_index] === session.playerId) {
-          const expiry = transition(nextGameState, { type: 'FORCE_TIMER_EXPIRY', timestamp: Date.now() }, Date.now());
+          const expiry = transition(
+            { ...nextGameState, active_power: null },
+            { type: 'FORCE_TIMER_EXPIRY', timestamp: Date.now() },
+            Date.now()
+          );
           nextGameState = expiry.state;
+          startTurnTimer(room);
         }
 
         // Check if the game should end (only one active player remaining)
@@ -565,6 +606,14 @@ wss.on('connection', ws => {
     console.error(`Socket error:`, err);
     handleDisconnect(clientSession);
   });
+});
+
+server.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use — is another game server running? Stop it, or start with a different port: $env:PORT=8081; npm start`);
+    process.exit(1);
+  }
+  throw err;
 });
 
 server.listen(PORT, () => {
