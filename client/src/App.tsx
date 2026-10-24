@@ -176,6 +176,7 @@ export default function App() {
   const [token,        setToken]        = useState<string|null>(null);
   const [isSpectator,  setIsSpectator]  = useState(false);
   const [lobbyPlayers, setLobbyPlayers] = useState<{id:string;name:string}[]>([]);
+  const [hostId,       setHostId]       = useState<string|null>(null);
   const [connState,    setConnState]    = useState<ConnectionState>('disconnected');
 
   // ── game state
@@ -186,6 +187,7 @@ export default function App() {
   const [selectedOwn,      setSelectedOwn]      = useState<string|null>(null);   // position
   const [selectedOpp,      setSelectedOpp]      = useState<{pid:string;pos:string}|null>(null);
   const [discardClickMode, setDiscardClickMode] = useState(false); // waiting for own card to swap with discard
+  const [jumpMode,         setJumpMode]         = useState<'own'|'opp'|null>(null); // armed jump-in type
   const [peekPositions,    setPeekPositions]    = useState<Set<string>>(new Set()); // "{playerId}:{pos}" currently peeking
   const [reconnCountdown,  setReconnCountdown]  = useState(300);
 
@@ -194,12 +196,14 @@ export default function App() {
   const timerIntervalRef   = useRef<any>(null);
   const reconnTimerRef     = useRef<any>(null);
   const toastTimerRef      = useRef<any>(null);
+  const turnKeyRef         = useRef<string>(''); // "{player index}:{phase}" of last state
 
   // ── derived
   const activePlayerId = gs ? gs.player_order[gs.current_player_index] : null;
   const isMyTurn       = !!myId && activePlayerId === myId;
   const myPlayer       = gs && myId ? gs.players[myId] : null;
   const topDiscard     = gs ? gs.discard_pile[gs.discard_pile.length - 1] : null;
+  const isHost         = !!myId && myId === hostId;
 
   // ─── Timer countdown
   const [secondsLeft, setSecondsLeft] = useState(30);
@@ -249,6 +253,7 @@ export default function App() {
         setToken(data.token);
         setJoinedRoom(data.roomId);
         setMyId(data.playerId);
+        setHostId(data.playerId);
         setLobbyPlayers(data.players ?? []);
         localStorage.setItem('cg_token',  data.token);
         localStorage.setItem('cg_room',   data.roomId);
@@ -261,6 +266,7 @@ export default function App() {
         setMyId(data.playerId);
         setIsSpectator(data.isSpectator ?? false);
         setLobbyPlayers(data.players ?? []);
+        setHostId(data.players?.[0]?.id ?? null);
         localStorage.setItem('cg_token',  data.token);
         localStorage.setItem('cg_room',   data.roomId);
         localStorage.setItem('cg_player', data.playerId);
@@ -276,19 +282,32 @@ export default function App() {
         break;
 
       case 'GAME_STATE_UPDATE': {
-        const newGs: MaskedGameState = data.gameState;
+        const newGs: MaskedGameState | null = data.gameState;
         setGs(newGs);
-        if (newGs?.players) {
-          setLobbyPlayers(
-            newGs.player_order.map(id => ({ id, name: newGs.players[id]?.name ?? id }))
-          );
+        if (data.players) setLobbyPlayers(data.players);
+        if (data.hostId !== undefined) setHostId(data.hostId);
+
+        // Reset interaction state only when the turn or phase moves on, so other
+        // players' jump-ins don't wipe a selection in progress
+        const turnKey = newGs ? `${newGs.status}:${newGs.current_player_index}:${newGs.turn_phase}` : '';
+        if (turnKey !== turnKeyRef.current) {
+          turnKeyRef.current = turnKey;
+          setSelectedOwn(null);
+          setSelectedOpp(null);
+          setDiscardClickMode(false);
         }
-        // Reset interaction state on phase changes
-        setSelectedOwn(null);
-        setSelectedOpp(null);
-        setDiscardClickMode(false);
+        if (!newGs?.jump_in_window_open) setJumpMode(null);
         break;
       }
+
+      case 'RECONNECT_FAILED':
+        localStorage.removeItem('cg_token');
+        localStorage.removeItem('cg_room');
+        localStorage.removeItem('cg_player');
+        wsRef.current?.close();
+        setJoinedRoom(null); setMyId(null); setToken(null); setGs(null);
+        showToast(data.error ?? 'Could not rejoin room', 'error');
+        break;
 
       case 'ACTION_FAILED':
         showToast(data.error ?? 'Action failed', 'error');
@@ -361,35 +380,43 @@ export default function App() {
 
   // ─── Card click dispatcher
   const handleCardClick = useCallback((ownerId: string, card: Card) => {
-    if (!gs || isSpectator || !myId) return;
+    if (!gs || isSpectator || !myId || gs.status === 'ended') return;
 
     const isMine  = ownerId === myId;
     const phase   = gs.turn_phase;
     const power   = gs.active_power?.power_type;
 
-    // ── Out-of-turn jump-in window ──────────────────────────
-    if (gs.jump_in_window_open) {
-      if (isMine && gs.status !== 'ended') {
-        // Type 1 jump-in: click own matching card
+    // ── Jump-in (only when explicitly armed, so normal turn clicks never
+    //    turn into accidental jump-ins and mistake penalties) ──────────
+    if (jumpMode) {
+      if (!gs.jump_in_window_open) {
+        setJumpMode(null);
+        showToast('Jump-in window is closed', 'error');
+        return;
+      }
+      if (jumpMode === 'own') {
+        // Type 1: discard your own matching card
+        if (!isMine) { showToast('Click one of YOUR cards that matches the discard', 'info'); return; }
         sendAction({ type: 'JUMP_IN_TYPE_1', card_position: card.position });
+        setJumpMode(null);
         return;
       }
-      if (!isMine && selectedOwn) {
-        // Type 2 jump-in: own card already selected, now click opponent's
-        sendAction({
-          type: 'JUMP_IN_TYPE_2',
-          opponent_player_id: ownerId,
-          opponent_position: card.position,
-          own_position: selectedOwn,
-        });
-        setSelectedOwn(null);
-        return;
-      }
+      // Type 2: pick the opponent card you know matches, then the card you give them
       if (!isMine) {
-        // Pre-select own card first for Type 2
-        showToast('First select one of YOUR cards, then click their card', 'info');
+        setSelectedOpp({ pid: ownerId, pos: card.position });
+        showToast('Now click one of YOUR cards to give them', 'info');
         return;
       }
+      if (!selectedOpp) { showToast("First click the opponent's card you know matches", 'info'); return; }
+      sendAction({
+        type: 'JUMP_IN_TYPE_2',
+        opponent_player_id: selectedOpp.pid,
+        opponent_position: selectedOpp.pos,
+        own_position: card.position,
+      });
+      setSelectedOpp(null);
+      setJumpMode(null);
+      return;
     }
 
     if (!isMyTurn) return;
@@ -425,7 +452,14 @@ export default function App() {
         if (isMine)  { setSelectedOwn(card.position); return; }
       }
     }
-  }, [gs, isSpectator, myId, isMyTurn, discardClickMode, selectedOwn, sendAction, showToast, triggerPeek]);
+  }, [gs, isSpectator, myId, isMyTurn, discardClickMode, jumpMode, selectedOwn, selectedOpp, sendAction, showToast, triggerPeek]);
+
+  const armJump = (mode: 'own'|'opp'|null) => {
+    setJumpMode(mode);
+    setSelectedOwn(null);
+    setSelectedOpp(null);
+    setDiscardClickMode(false);
+  };
 
   // ─── Confirm power actions (J/Q and K need two selections)
   const confirmJQ = () => {
@@ -523,6 +557,7 @@ export default function App() {
             </div>
           </div>
 
+          {!joinedRoom && (<>
           {/* Player name */}
           <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 6, display: 'block', fontWeight: 700 }}>
             Your Name
@@ -562,22 +597,31 @@ export default function App() {
           <button className="btn btn-purple w-full" onClick={() => joinRoom(true)} disabled={!playerName.trim() || !roomCode.trim()}>
             👁 Spectate
           </button>
+          </>)}
 
           {/* Waiting lobby players */}
           {joinedRoom && (
-            <div style={{ marginTop: 24 }}>
+            <div>
               <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 8, fontWeight: 700 }}>
-                Lobby — {joinedRoom}
+                Lobby — share code <strong style={{ color: 'var(--accent)', letterSpacing: '.15em' }}>{joinedRoom}</strong>
               </div>
-              {lobbyPlayers.map((p, i) => (
+              {lobbyPlayers.map(p => (
                 <div key={p.id} className="player-lobby-row">
-                  <span style={{ fontWeight: 600 }}>{p.name}</span>
-                  {i === 0 && <span className="badge badge-accent">Host</span>}
+                  <span style={{ fontWeight: 600 }}>{p.name}{p.id === myId ? ' (you)' : ''}</span>
+                  {p.id === hostId && <span className="badge badge-accent">Host</span>}
                 </div>
               ))}
-              <button className="btn btn-gold w-full" style={{ marginTop: 12 }} onClick={startGame}>
-                Start Match ({lobbyPlayers.length}/4)
-              </button>
+              {isSpectator && (
+                <div className="action-hint" style={{ marginTop: 12 }}>You are spectating — waiting for the host to start.</div>
+              )}
+              {isHost ? (
+                <button className="btn btn-gold w-full" style={{ marginTop: 12 }} onClick={startGame} disabled={lobbyPlayers.length < 2}>
+                  {lobbyPlayers.length < 2 ? 'Waiting for players… (1/4)' : `Start Match (${lobbyPlayers.length}/4)`}
+                </button>
+              ) : !isSpectator && (
+                <div className="action-hint" style={{ marginTop: 12 }}>Waiting for the host to start the match…</div>
+              )}
+              <button className="btn btn-ghost w-full" style={{ marginTop: 8 }} onClick={handleLeave}>Leave Lobby</button>
             </div>
           )}
         </div>
@@ -627,7 +671,9 @@ export default function App() {
           </div>
 
           <div style={{ display: 'flex', gap: 10 }}>
-            <button className="btn btn-primary btn-lg grow" onClick={startGame}>Play Again</button>
+            {isHost
+              ? <button className="btn btn-primary btn-lg grow" onClick={startGame}>Play Again</button>
+              : <div className="action-hint grow">Waiting for the host to start a new match…</div>}
             <button className="btn btn-ghost" onClick={handleLeave}>Exit</button>
           </div>
         </div>
@@ -806,6 +852,35 @@ export default function App() {
               </div>
             </div>
 
+            {/* ── Jump-in controls (any player, any time the window is open) ── */}
+            {!isSpectator && myPlayer && gs.jump_in_window_open && topDiscard && (
+              <div className="controls-panel" style={{ marginBottom: 8 }}>
+                {jumpMode ? (
+                  <>
+                    <div className="action-hint">
+                      {jumpMode === 'own'
+                        ? <>Click YOUR card that matches <strong>{topDiscard.value}</strong></>
+                        : selectedOpp
+                          ? <>Now click one of YOUR cards to give them</>
+                          : <>Click the opponent card you know is a <strong>{topDiscard.value}</strong></>}
+                    </div>
+                    <button className="btn btn-danger w-full" onClick={() => armJump(null)}>Cancel Jump-In</button>
+                  </>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <button className="btn btn-ghost grow" style={{ fontSize: '0.75rem' }} onClick={() => armJump('own')}
+                      title="Discard your own card that matches the top discard">
+                      Jump In: My Card
+                    </button>
+                    <button className="btn btn-ghost grow" style={{ fontSize: '0.75rem' }} onClick={() => armJump('opp')}
+                      title="Discard an opponent card you know matches, and give them one of yours">
+                      Jump In: Theirs
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* ── Action Controls ── */}
             {isMyTurn && (
               <div className="controls-panel">
@@ -838,7 +913,7 @@ export default function App() {
                       </div>
                     </div>
                     <button className="btn btn-primary w-full" onClick={() => sendAction({ type: 'DRAW_PILE_DISCARD' })}>
-                      Discard (activate power)
+                      {['7','8','9','10','J','Q','K'].includes(gs.drawn_card.value ?? '') ? 'Discard (activate power)' : 'Discard'}
                     </button>
                     <div className="action-hint">Or click one of YOUR cards to Keep &amp; Swap it in.</div>
                   </div>
@@ -895,7 +970,7 @@ export default function App() {
               <div className="controls-panel">
                 <div className="action-hint">
                   Watching {gs.players[activePlayerId ?? '']?.name ?? '…'}'s turn…<br/>
-                  {gs.jump_in_window_open && <strong style={{color:'var(--green)'}}>Jump-in window OPEN — click a matching card!</strong>}
+                  {gs.jump_in_window_open && <strong style={{color:'var(--green)'}}>Jump-in window OPEN — use the Jump In buttons above.</strong>}
                 </div>
               </div>
             )}

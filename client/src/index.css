@@ -320,10 +320,13 @@ body {
    ============================================================ */
 .game-area {
   display: grid;
-  grid-template-columns: 1fr 200px;
+  grid-template-columns: minmax(0, 1fr) 240px;
   gap: 12px;
   align-items: start;
 }
+
+.game-area > * { min-width: 0; }
+.center-board .btn { white-space: normal; }
 
 @media (max-width: 900px) {
   .game-area { grid-template-columns: 1fr; }
