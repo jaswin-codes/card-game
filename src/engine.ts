@@ -347,8 +347,9 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
           ...nextState,
           draw_pile: nextState.draw_pile.slice(1),
           drawn_card: drawnWithKnowledge,
-          turn_phase: 'draw_decide',
-          jump_in_window_open: false // closing previous discard window once turn progresses
+          turn_phase: 'draw_decide'
+          // Jump-in window on the previous discard stays open until this player
+          // actually places a card on the discard pile.
         },
         success: true
       };
@@ -850,7 +851,8 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
             ...ownCard,
             position: action.opponent_position,
             face_up: false,
-            known_by: [] // Knowledge reset for opponent card
+            // Only the jumper keeps knowledge of the card they handed over
+            known_by: ownCard.known_by.includes(action.player_id) ? [action.player_id] : []
           });
 
         // Jumper loses ownCard
@@ -968,19 +970,34 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
         return completeTurn(nextGameState, activePlayerId, timestamp);
       } else {
         // Turn timer expired: active player gets a penalty card and turn is passed
-        const activePlayerId = state.player_order[state.current_player_index];
-        let nextGameState = applyMistake(state, activePlayerId, timestamp);
-        // Pass turn if not ended
-        if (nextGameState.status !== 'ended') {
-          nextGameState.current_player_index = getNextPlayerIndex(
-            nextGameState.current_player_index,
-            nextGameState.player_order,
-            nextGameState.players
-          );
-          nextGameState.turn_phase = 'action_choice';
-          nextGameState.turn_timer_start = timestamp;
+        const activeIndex = state.current_player_index;
+        const activePlayerId = state.player_order[activeIndex];
+        let nextGameState: GameState = { ...state };
+
+        // A card drawn but never decided on goes to the discard pile (no power)
+        if (nextGameState.drawn_card) {
+          const discarded = { ...nextGameState.drawn_card, face_up: true };
+          nextGameState = {
+            ...nextGameState,
+            discard_pile: [...nextGameState.discard_pile, discarded],
+            drawn_card: null,
+            last_discard_card: discarded,
+            last_discard_player_id: activePlayerId,
+            jump_in_window_open: true
+          };
         }
-        return { state: nextGameState, success: true };
+
+        if (state.players[activePlayerId]?.connection_status !== 'eliminated') {
+          nextGameState = applyMistake(nextGameState, activePlayerId, timestamp);
+        }
+        if (nextGameState.status === 'ended') {
+          return { state: nextGameState, success: true };
+        }
+
+        // applyMistake may already have advanced past an eliminated player; rewind so
+        // completeTurn advances exactly once and records the final turn if needed.
+        nextGameState = { ...nextGameState, current_player_index: activeIndex };
+        return completeTurn(nextGameState, activePlayerId, timestamp);
       }
     }
 

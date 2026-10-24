@@ -540,3 +540,48 @@ describe('Bad-input resilience', () => {
     }).not.toThrow();
   });
 });
+
+describe('Timer expiry and jump-in window', () => {
+  it('turn timer expiry during draw_decide discards the drawn card and passes the turn', () => {
+    const state = createInitialState(['P1', 'P2']);
+    const drawn = transition(state, { type: 'DRAW_PILE_DRAW', player_id: 'P1', timestamp: 1 }, 1);
+    const drawnId = drawn.state.drawn_card!.id;
+
+    const res = transition(drawn.state, { type: 'FORCE_TIMER_EXPIRY', timestamp: 2 }, 2);
+    expect(res.state.drawn_card).toBeNull();
+    expect(res.state.discard_pile[res.state.discard_pile.length - 1].id).toBe(drawnId);
+    expect(res.state.players['P1'].cards.length).toBe(5); // penalty card
+    expect(res.state.player_order[res.state.current_player_index]).toBe('P2');
+    expect(res.state.turn_phase).toBe('action_choice');
+  });
+
+  it('turn timer expiry in the final round counts as the final turn and ends the game', () => {
+    const state = createInitialState(['P1', 'P2']);
+    const called = transition(state, { type: 'CALL', player_id: 'P1', timestamp: 1 }, 1);
+    expect(called.state.status).toBe('final_round');
+
+    const res = transition(called.state, { type: 'FORCE_TIMER_EXPIRY', timestamp: 2 }, 2);
+    expect(res.state.players['P2'].took_final_turn).toBe(true);
+    expect(res.state.status).toBe('ended');
+  });
+
+  it('jump-in window on the previous discard stays open while the next player decides', () => {
+    const state = createInitialState(['P1', 'P2']);
+    const drawn = transition(state, { type: 'DRAW_PILE_DRAW', player_id: 'P1', timestamp: 1 }, 1);
+    expect(drawn.state.jump_in_window_open).toBe(true);
+  });
+
+  it('timer expiry for an eliminated active player passes the turn without dealing them a card', () => {
+    let state = createInitialState(['P1', 'P2', 'P3']);
+    state = {
+      ...state,
+      players: {
+        ...state.players,
+        P1: { ...state.players['P1'], connection_status: 'eliminated', is_spectator: true, cards: [] }
+      }
+    };
+    const res = transition(state, { type: 'FORCE_TIMER_EXPIRY', timestamp: 1 }, 1);
+    expect(res.state.players['P1'].cards.length).toBe(0);
+    expect(res.state.player_order[res.state.current_player_index]).toBe('P2');
+  });
+});
