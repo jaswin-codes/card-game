@@ -801,10 +801,8 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
       }
 
       // King matching checks
-      const isKingMatch = card.value === 'K' && state.last_discard_card.value === 'K';
-      const ranksMatch = card.value === state.last_discard_card.value;
-
-      if (ranksMatch || isKingMatch) {
+      // Ranks compare by value only, so red and black Kings match each other
+      if (card.value === state.last_discard_card.value) {
         // Valid jump-in
         const discarded = { ...card, face_up: true, position: 'top-left' as CardPosition };
         const nextCards = player.cards.filter(c => c.position !== action.card_position);
@@ -824,6 +822,8 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
         };
 
         return { state: nextGameState, success: true };
+      } else if (lostJumpInRace(state, action.expected_discard_id)) {
+        return { state, success: false, error: 'Too late — someone else jumped in first' };
       } else {
         // Wrong jump-in number mistake
         const nextState = applyMistake(state, action.player_id, timestamp);
@@ -866,16 +866,17 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
 
       // Check if jumper has seen the opponent's card (prior knowledge)
       const hasPriorKnowledge = oppCard.known_by.includes(action.player_id);
+      const matches = oppCard.value === state.last_discard_card.value;
+      if (!(hasPriorKnowledge && matches) && lostJumpInRace(state, action.expected_discard_id)) {
+        return { state, success: false, error: 'Too late — someone else jumped in first' };
+      }
       if (!hasPriorKnowledge) {
         // Mistake: illegal peeking / wrong jump-in / knowledge requirement not met
         const nextState = applyMistake(state, action.player_id, timestamp);
         return { state: nextState, success: false, error: 'No prior knowledge of opponent card' };
       }
 
-      const isKingMatch = oppCard.value === 'K' && state.last_discard_card.value === 'K';
-      const ranksMatch = oppCard.value === state.last_discard_card.value;
-
-      if (ranksMatch || isKingMatch) {
+      if (matches) {
         // Valid jump-in: discard opponent's card, give opponent own card
         const discarded = { ...oppCard, face_up: true, position: 'top-left' as CardPosition };
 
@@ -1039,6 +1040,12 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
     default:
       return { state, success: false, error: 'Unknown action' };
   }
+}
+
+// A jump-in aimed at a discard that has since been covered lost a race; it is
+// not a mistake, because the player matched the card they saw.
+function lostJumpInRace(state: GameState, expectedDiscardId: string | undefined): boolean {
+  return !!expectedDiscardId && state.last_discard_card?.id !== expectedDiscardId;
 }
 
 // Complete the active turn and advance logic

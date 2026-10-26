@@ -398,7 +398,7 @@ export default function App() {
       if (jumpMode === 'own') {
         // Type 1: discard your own matching card
         if (!isMine) { showToast('Click one of YOUR cards that matches the discard', 'info'); return; }
-        sendAction({ type: 'JUMP_IN_TYPE_1', card_position: card.position });
+        sendAction({ type: 'JUMP_IN_TYPE_1', card_position: card.position, expected_discard_id: gs.last_discard_card?.id });
         setJumpMode(null);
         return;
       }
@@ -414,6 +414,7 @@ export default function App() {
         opponent_player_id: selectedOpp.pid,
         opponent_position: selectedOpp.pos,
         own_position: card.position,
+        expected_discard_id: gs.last_discard_card?.id,
       });
       setSelectedOpp(null);
       setJumpMode(null);

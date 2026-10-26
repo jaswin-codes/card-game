@@ -83,8 +83,8 @@ export type Action =
   | { type: 'RESOLVE_POWER_K_LOOK'; player_id: string; own_position: CardPosition; opponent_player_id: string; opponent_position: CardPosition; timestamp: number }
   | { type: 'RESOLVE_POWER_K'; player_id: string; own_position: CardPosition; opponent_player_id: string; opponent_position: CardPosition; should_swap: boolean; timestamp: number }
   | { type: 'SKIP_POWER'; player_id: string; timestamp: number }
-  | { type: 'JUMP_IN_TYPE_1'; player_id: string; card_position: CardPosition; timestamp: number }
-  | { type: 'JUMP_IN_TYPE_2'; player_id: string; opponent_player_id: string; opponent_position: CardPosition; own_position: CardPosition; timestamp: number }
+  | { type: 'JUMP_IN_TYPE_1'; player_id: string; card_position: CardPosition; expected_discard_id?: string; timestamp: number }
+  | { type: 'JUMP_IN_TYPE_2'; player_id: string; opponent_player_id: string; opponent_position: CardPosition; own_position: CardPosition; expected_discard_id?: string; timestamp: number }
   | { type: 'CALL'; player_id: string; timestamp: number }
   | { type: 'DISCONNECT'; player_id: string; timestamp: number }
   | { type: 'RECONNECT'; player_id: string; timestamp: number }
