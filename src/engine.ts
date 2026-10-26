@@ -657,6 +657,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
       return completeTurn(nextGameState, action.player_id, timestamp);
     }
 
+    case 'RESOLVE_POWER_K_LOOK':
     case 'RESOLVE_POWER_K': {
       if (!state.active_power || state.active_power.power_type !== 'K' || state.active_power.player_id !== action.player_id) {
         const nextState = applyMistake(state, action.player_id, timestamp);
@@ -665,6 +666,12 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
 
       if (action.opponent_player_id === action.player_id) {
         return { state, success: false, error: 'Cannot target yourself' };
+      }
+
+      // After looking, the swap decision applies to exactly the cards looked at
+      const sel = state.active_power.k_selection;
+      if (sel && (sel.own_position !== action.own_position || sel.opponent_player_id !== action.opponent_player_id || sel.opponent_position !== action.opponent_position)) {
+        return { state, success: false, error: 'You already looked at other cards' };
       }
 
       if (state.status === 'final_round') {
@@ -676,7 +683,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
 
       const ownPlayer = state.players[action.player_id];
       const oppPlayer = state.players[action.opponent_player_id];
-      if (!ownPlayer || !oppPlayer) {
+      if (!ownPlayer || !oppPlayer || oppPlayer.is_spectator) {
         return { state, success: false, error: 'Players not found' };
       }
 
@@ -684,6 +691,26 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
       const oppCard = oppPlayer.cards.find(c => c.position === action.opponent_position);
       if (!ownCard || !oppCard) {
         return { state, success: false, error: 'Card position not found' };
+      }
+
+      if (action.type === 'RESOLVE_POWER_K_LOOK') {
+        if (sel) return { state, success: false, error: 'Already looked' };
+        const learn = (c: Card) => ({ ...c, known_by: Array.from(new Set([...c.known_by, action.player_id])) });
+        return {
+          state: {
+            ...state,
+            players: {
+              ...state.players,
+              [action.player_id]: { ...ownPlayer, cards: ownPlayer.cards.map(c => (c.position === action.own_position ? learn(c) : c)) },
+              [action.opponent_player_id]: { ...oppPlayer, cards: oppPlayer.cards.map(c => (c.position === action.opponent_position ? learn(c) : c)) }
+            },
+            active_power: {
+              ...state.active_power,
+              k_selection: { own_position: action.own_position, opponent_player_id: action.opponent_player_id, opponent_position: action.opponent_position }
+            }
+          },
+          success: true
+        };
       }
 
       // Add to known_by of both cards
@@ -740,6 +767,14 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
       };
 
       return completeTurn(nextGameState, action.player_id, timestamp);
+    }
+
+    case 'SKIP_POWER': {
+      // Powers are optional ("you may now activate it")
+      if (!state.active_power || state.active_power.player_id !== action.player_id) {
+        return { state, success: false, error: 'No power to skip' };
+      }
+      return completeTurn({ ...state, active_power: null, turn_phase: 'action_choice' }, action.player_id, timestamp);
     }
 
     case 'JUMP_IN_TYPE_1': {

@@ -43,6 +43,7 @@ interface PowerState {
   card_id: string;
   power_type: '7_8' | '9_10' | 'J_Q' | 'K';
   player_id: string;
+  k_selection?: { own_position: string; opponent_player_id: string; opponent_position: string };
 }
 
 interface MaskedGameState {
@@ -95,7 +96,7 @@ function powerInstruction(pt: PowerState['power_type']): string {
     case '7_8':  return 'Click one of your own face-down cards to peek at it briefly.';
     case '9_10': return "Click one of an opponent's face-down cards to peek at it.";
     case 'J_Q':  return 'Select one of YOUR cards, then one OPPONENT card — you will swap them blind.';
-    case 'K':    return 'Select one of YOUR cards and one OPPONENT card — you may then choose to swap or keep info.';
+    case 'K':    return 'Select one of YOUR cards and one OPPONENT card, look at both, then choose whether to swap.';
   }
 }
 
@@ -446,10 +447,10 @@ export default function App() {
         triggerPeek(ownerId, card.position);
         return;
       }
-      if ((power === 'J_Q' || power === 'K')) {
-        if (isMine && !selectedOwn) { setSelectedOwn(card.position); return; }
-        if (!isMine && selectedOwn) { setSelectedOpp({ pid: ownerId, pos: card.position }); return; }
-        if (isMine)  { setSelectedOwn(card.position); return; }
+      if ((power === 'J_Q' || power === 'K') && !gs.active_power?.k_selection) {
+        if (isMine) setSelectedOwn(card.position);
+        else setSelectedOpp({ pid: ownerId, pos: card.position });
+        return;
       }
     }
   }, [gs, isSpectator, myId, isMyTurn, discardClickMode, jumpMode, selectedOwn, selectedOpp, sendAction, showToast, triggerPeek]);
@@ -466,9 +467,14 @@ export default function App() {
     if (!selectedOwn || !selectedOpp) return;
     sendAction({ type: 'RESOLVE_POWER_J_Q', own_position: selectedOwn, opponent_player_id: selectedOpp.pid, opponent_position: selectedOpp.pos });
   };
-  const confirmK = (doSwap: boolean) => {
+  const lookK = () => {
     if (!selectedOwn || !selectedOpp) return;
-    sendAction({ type: 'RESOLVE_POWER_K', own_position: selectedOwn, opponent_player_id: selectedOpp.pid, opponent_position: selectedOpp.pos, should_swap: doSwap });
+    sendAction({ type: 'RESOLVE_POWER_K_LOOK', own_position: selectedOwn, opponent_player_id: selectedOpp.pid, opponent_position: selectedOpp.pos });
+  };
+  const confirmK = (doSwap: boolean) => {
+    const sel = gs?.active_power?.k_selection;
+    if (!sel) return;
+    sendAction({ type: 'RESOLVE_POWER_K', ...sel, should_swap: doSwap });
   };
 
   // ─── Render a player's card grid ─────────────────────────
@@ -945,15 +951,22 @@ export default function App() {
                     {power === 'J_Q' && selectedOwn && selectedOpp && (
                       <button className="btn btn-primary w-full" onClick={confirmJQ}>Confirm Blind Swap</button>
                     )}
-                    {power === 'K' && selectedOwn && selectedOpp && (
+                    {power === 'K' && !gs.active_power.k_selection && selectedOwn && selectedOpp && (
+                      <button className="btn btn-primary w-full" onClick={lookK}>Look at Both Cards</button>
+                    )}
+                    {power === 'K' && gs.active_power.k_selection && (
                       <div style={{ display: 'flex', gap: 8 }}>
-                        <button className="btn btn-ghost grow" onClick={() => confirmK(false)}>Peek Only</button>
-                        <button className="btn btn-primary grow" onClick={() => confirmK(true)}>Peek &amp; Swap</button>
+                        <button className="btn btn-ghost grow" onClick={() => confirmK(false)}>Keep</button>
+                        <button className="btn btn-primary grow" onClick={() => confirmK(true)}>Swap</button>
                       </div>
                     )}
+                    <button className="btn btn-ghost w-full" style={{ fontSize: '0.75rem' }}
+                      onClick={() => sendAction({ type: 'SKIP_POWER' })}>
+                      Skip Power
+                    </button>
 
                     <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
-                      {(power === 'J_Q' || power === 'K') && (selectedOwn || selectedOpp) && (
+                      {(power === 'J_Q' || power === 'K') && !gs.active_power.k_selection && (selectedOwn || selectedOpp) && (
                         <button className="btn btn-danger" style={{ fontSize: '0.75rem', padding: '6px 12px' }}
                           onClick={() => { setSelectedOwn(null); setSelectedOpp(null); }}>
                           Clear Selection

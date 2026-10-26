@@ -16,6 +16,7 @@ import {
   transition,
   calculatePlayerScore
 } from './engine.js';
+import { maskGameState } from './mask.js';
 
 interface Session {
   playerId: string;
@@ -46,7 +47,9 @@ const CLIENT_ACTION_TYPES = new Set<string>([
   'RESOLVE_POWER_7_8',
   'RESOLVE_POWER_9_10',
   'RESOLVE_POWER_J_Q',
+  'RESOLVE_POWER_K_LOOK',
   'RESOLVE_POWER_K',
+  'SKIP_POWER',
   'JUMP_IN_TYPE_1',
   'JUMP_IN_TYPE_2',
   'CALL'
@@ -111,64 +114,13 @@ const server = createServer((req, res) => {
 });
 const wss = new WebSocketServer({ noServer: true });
 
-// Helper to mask state for a specific client session
-function maskGameState(state: GameState | null, viewerSession: Session): any {
-  if (!state) return null;
-
-  const maskedPlayers: Record<string, any> = {};
-
-  for (const [id, p] of Object.entries(state.players)) {
-    const maskedCards = p.cards.map(c => {
-      // Spectators see no face-down cards
-      if (viewerSession.isSpectator || viewerSession.playerId === 'spectator') {
-        return {
-          ...c,
-          value: c.face_up ? c.value : null,
-          suit: c.face_up ? c.suit : null,
-          known_by: [] // Hide who knows what
-        };
-      }
-
-      // Active player views cards:
-      // Can see card value/suit if it is face-up OR known by the viewer
-      const canSee = c.face_up || c.known_by.includes(viewerSession.playerId);
-      return {
-        ...c,
-        value: canSee ? c.value : null,
-        suit: canSee ? c.suit : null,
-        known_by: c.known_by.includes(viewerSession.playerId) ? [viewerSession.playerId] : []
-      };
-    });
-
-    maskedPlayers[id] = {
-      ...p,
-      cards: maskedCards,
-      score: p.connection_status === 'eliminated' ? 0 : calculatePlayerScore(p)
-    };
-  }
-
-  // Hide the draw pile details except length
-  const drawPileLength = state.draw_pile.length;
-
-  return {
-    ...state,
-    players: maskedPlayers,
-    draw_pile: { length: drawPileLength } as any,
-    drawn_card: state.drawn_card
-      ? viewerSession.playerId === state.player_order[state.current_player_index]
-        ? state.drawn_card
-        : { id: state.drawn_card.id, value: null, suit: null, position: state.drawn_card.position, face_up: false, known_by: [] }
-      : null
-  };
-}
-
 // Broadcast game state to all clients in a room
 function broadcastRoomState(room: Room) {
   const allClients = [...room.players, ...room.spectators];
 
   for (const client of allClients) {
     if (client.ws && client.ws.readyState === WebSocket.OPEN) {
-      const masked = maskGameState(room.gameState, client);
+      const masked = maskGameState(room.gameState, client.playerId, client.isSpectator);
       client.ws.send(
         JSON.stringify({
           type: 'GAME_STATE_UPDATE',

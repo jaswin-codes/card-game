@@ -42,6 +42,8 @@ export interface PowerState {
   power_type: '7_8' | '9_10' | 'J_Q' | 'K';
   player_id: string; // player who discarded and is resolving power
   timer_start: number; // timestamp
+  // King: the two cards already looked at, so the swap decision must use them
+  k_selection?: { own_position: CardPosition; opponent_player_id: string; opponent_position: CardPosition };
 }
 
 export type TurnPhase = 'action_choice' | 'draw_decide' | 'resolving_power';
@@ -78,7 +80,9 @@ export type Action =
   | { type: 'RESOLVE_POWER_7_8'; player_id: string; target_position: CardPosition; timestamp: number }
   | { type: 'RESOLVE_POWER_9_10'; player_id: string; target_player_id: string; target_position: CardPosition; timestamp: number }
   | { type: 'RESOLVE_POWER_J_Q'; player_id: string; own_position: CardPosition; opponent_player_id: string; opponent_position: CardPosition; timestamp: number }
+  | { type: 'RESOLVE_POWER_K_LOOK'; player_id: string; own_position: CardPosition; opponent_player_id: string; opponent_position: CardPosition; timestamp: number }
   | { type: 'RESOLVE_POWER_K'; player_id: string; own_position: CardPosition; opponent_player_id: string; opponent_position: CardPosition; should_swap: boolean; timestamp: number }
+  | { type: 'SKIP_POWER'; player_id: string; timestamp: number }
   | { type: 'JUMP_IN_TYPE_1'; player_id: string; card_position: CardPosition; timestamp: number }
   | { type: 'JUMP_IN_TYPE_2'; player_id: string; opponent_player_id: string; opponent_position: CardPosition; own_position: CardPosition; timestamp: number }
   | { type: 'CALL'; player_id: string; timestamp: number }
