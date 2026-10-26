@@ -161,6 +161,51 @@ function GameCard({
   );
 }
 
+interface ChatLine { kind: 'chat' | 'emoji' | 'system'; from: string | null; name: string; spectator: boolean; text: string; ts: number }
+
+const REACTIONS = ['👍', '😂', '😮', '😡', '🔥', '👏', '🤔', '😭'];
+const CHAT_HISTORY = 40;
+
+/** Chat + quick reactions. Text is rendered by React, so it is always escaped. */
+function ChatPanel({ lines, myId, onSend, onReact }: {
+  lines: ChatLine[]; myId: string | null; onSend: (text: string) => void; onReact: (emoji: string) => void;
+}) {
+  const [draft, setDraft] = useState('');
+  const listRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { listRef.current?.scrollTo(0, listRef.current.scrollHeight); }, [lines]);
+
+  const submit = () => {
+    const text = draft.trim();
+    if (!text) return;
+    onSend(text);
+    setDraft('');
+  };
+
+  return (
+    <div className="glass chat-panel">
+      <div className="chat-reactions">
+        {REACTIONS.map(e => (
+          <button key={e} className="chat-reaction" onClick={() => onReact(e)} aria-label={`React ${e}`}>{e}</button>
+        ))}
+      </div>
+      <div className="chat-list" ref={listRef} aria-live="polite">
+        {lines.length === 0 && <div className="chat-empty">No messages yet</div>}
+        {lines.map((l, i) => (
+          <div key={i} className={`chat-line ${l.kind}`}>
+            {l.kind !== 'system' && <strong>{l.from === myId ? 'You' : l.name}{l.spectator ? ' 👁' : ''}: </strong>}
+            <span className={l.kind === 'emoji' ? 'chat-emoji' : ''}>{l.text}</span>
+          </div>
+        ))}
+      </div>
+      <div className="chat-input-row">
+        <input className="input" maxLength={200} placeholder="Say something…" value={draft}
+          onChange={e => setDraft(e.target.value)} onKeyDown={e => e.key === 'Enter' && submit()} aria-label="Chat message" />
+        <button className="btn btn-ghost" onClick={submit} disabled={!draft.trim()}>Send</button>
+      </div>
+    </div>
+  );
+}
+
 /** Toast notification */
 function Toast({ msg, kind }: { msg: string; kind: 'error'|'info'|'success' }) {
   return <div className={`toast ${kind}`}>{msg}</div>;
@@ -190,6 +235,7 @@ export default function App() {
   const [selectedOpp,      setSelectedOpp]      = useState<{pid:string;pos:string}|null>(null);
   const [discardClickMode, setDiscardClickMode] = useState(false); // waiting for own card to swap with discard
   const [jumpMode,         setJumpMode]         = useState<'own'|'opp'|null>(null); // armed jump-in type
+  const [chat,             setChat]             = useState<ChatLine[]>([]);
   const [peekPositions,    setPeekPositions]    = useState<Set<string>>(new Set()); // "{playerId}:{pos}" currently peeking
   const [reconnCountdown,  setReconnCountdown]  = useState(300);
 
@@ -325,6 +371,10 @@ export default function App() {
         showToast(data.error ?? 'Could not rejoin room', 'error');
         break;
 
+      case 'CHAT':
+        setChat(prev => [...prev, data as ChatLine].slice(-CHAT_HISTORY));
+        break;
+
       case 'ACTION_FAILED':
         showToast(data.error ?? 'Action failed', 'error');
         break;
@@ -384,6 +434,11 @@ export default function App() {
   };
 
   const startGame = () => send({ type: 'START_GAME' });
+  const chatPanel = (
+    <ChatPanel lines={chat} myId={myId}
+      onSend={text => send({ type: 'CHAT', text })}
+      onReact={emoji => send({ type: 'REACTION', emoji })} />
+  );
 
   const handleLeave = () => {
     localStorage.removeItem('cg_token');
@@ -391,7 +446,7 @@ export default function App() {
     localStorage.removeItem('cg_player');
     wsRef.current?.close();
     setJoinedRoom(null); setMyId(null); setToken(null);
-    setGs(null); setConnState('disconnected');
+    setGs(null); setConnState('disconnected'); setChat([]);
   };
 
   // ─── Card click dispatcher
@@ -644,6 +699,7 @@ export default function App() {
                 <div className="action-hint" style={{ marginTop: 12 }}>Waiting for the host to start the match…</div>
               )}
               <button className="btn btn-ghost w-full" style={{ marginTop: 8 }} onClick={handleLeave}>Leave Lobby</button>
+              <div style={{ marginTop: 16 }}>{chatPanel}</div>
             </div>
           )}
         </div>
@@ -1012,6 +1068,7 @@ export default function App() {
               </div>
             )}
           </div>
+          {chatPanel}
         </div>
       </div>
     </div>

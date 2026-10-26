@@ -25,6 +25,8 @@ interface Session {
   roomId: string;
   isSpectator: boolean;
   ws: WebSocket | null;
+  chatTimes: number[]; // send times inside the current rate-limit window
+  lastAction: { type: string; ok: boolean; error?: string } | null; // checked by "Call Mistake"
 }
 
 interface Room {
@@ -54,6 +56,27 @@ const CLIENT_ACTION_TYPES = new Set<string>([
   'JUMP_IN_TYPE_2',
   'CALL'
 ]);
+
+const CHAT_MAX_LENGTH = 200;
+const CHAT_WINDOW_MS = 10000;
+const CHAT_MAX_PER_WINDOW = 5;
+const REACTIONS = new Set(['👍', '😂', '😮', '😡', '🔥', '👏', '🤔', '😭']);
+
+const ACTION_LABELS: Record<string, string> = {
+  DRAW_PILE_DRAW: 'draw from the pile',
+  DRAW_PILE_KEEP: 'keep the drawn card',
+  DRAW_PILE_DISCARD: 'discard the drawn card',
+  TAKE_DISCARD_SWAP: 'take the discard',
+  RESOLVE_POWER_7_8: 'look at own card',
+  RESOLVE_POWER_9_10: "look at an opponent's card",
+  RESOLVE_POWER_J_Q: 'blind swap',
+  RESOLVE_POWER_K_LOOK: 'King look',
+  RESOLVE_POWER_K: 'King swap decision',
+  SKIP_POWER: 'skip power',
+  JUMP_IN_TYPE_1: 'jump in with own card',
+  JUMP_IN_TYPE_2: "jump in with an opponent's card",
+  CALL: 'call'
+};
 
 const rooms: Record<string, Room> = {};
 const sessions: Record<string, Session> = {}; // token -> Session
@@ -132,6 +155,22 @@ function broadcastRoomState(room: Room) {
         })
       );
     }
+  }
+}
+
+// Relay a chat line, reaction or server notice to everyone in the room
+function broadcastChat(room: Room, from: Session | null, kind: 'chat' | 'emoji' | 'system', text: string) {
+  const payload = JSON.stringify({
+    type: 'CHAT',
+    kind,
+    from: from?.playerId ?? null,
+    name: from?.name ?? 'Server',
+    spectator: !!from?.isSpectator,
+    text,
+    ts: Date.now()
+  });
+  for (const client of [...room.players, ...room.spectators]) {
+    if (client.ws && client.ws.readyState === WebSocket.OPEN) client.ws.send(payload);
   }
 }
 
@@ -219,7 +258,9 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
         token,
         roomId,
         isSpectator: false,
-        ws
+        ws,
+        chatTimes: [],
+        lastAction: null
       };
 
       sessions[token] = session;
@@ -265,7 +306,9 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
         token,
         roomId,
         isSpectator: joinAsSpectator,
-        ws
+        ws,
+        chatTimes: [],
+        lastAction: null
       };
 
       sessions[token] = session;
@@ -356,6 +399,7 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
       if (!result.success) {
         ws.send(JSON.stringify({ type: 'ACTION_FAILED', error: result.error }));
       }
+      session.lastAction = { type: action.type, ok: result.success, error: result.error };
 
       // Timers only restart when the turn or phase actually moves on, so
       // out-of-turn jump-ins don't reset the active player's clock.
@@ -375,6 +419,36 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
       }
 
       broadcastRoomState(room);
+      break;
+    }
+
+    case 'CHAT':
+    case 'REACTION': {
+      const session = clientSession.session;
+      const room = session && rooms[session.roomId];
+      if (!session || !room) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'Join a room first' }));
+        return;
+      }
+
+      const text = message.type === 'CHAT' && typeof message.text === 'string' ? message.text.trim() : message.emoji;
+      if (message.type === 'CHAT' && (!text || text.length > CHAT_MAX_LENGTH)) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: `Messages must be 1–${CHAT_MAX_LENGTH} characters` }));
+        return;
+      }
+      if (message.type === 'REACTION' && !REACTIONS.has(text)) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'Unknown reaction' }));
+        return;
+      }
+
+      session.chatTimes = session.chatTimes.filter(t => timestamp - t < CHAT_WINDOW_MS);
+      if (session.chatTimes.length >= CHAT_MAX_PER_WINDOW) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'Slow down — too many messages' }));
+        return;
+      }
+      session.chatTimes.push(timestamp);
+
+      broadcastChat(room, session, message.type === 'CHAT' ? 'chat' : 'emoji', text);
       break;
     }
 
