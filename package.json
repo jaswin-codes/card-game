@@ -8,6 +8,7 @@
     "build": "tsc",
     "build:client": "npm --prefix client run build",
     "build:all": "npm run build && npm run build:client",
+    "pretest": "tsc",
     "test": "vitest run",
     "start": "npm run build && node dist/src/server.js",
     "dev:server": "node --watch dist/src/server.js",
