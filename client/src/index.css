@@ -879,7 +879,7 @@ body {
   .card-value-tl { font-size: 1rem; }
   .card-suit-br { font-size: 1.2rem; }
   .table-col { display: contents; }
-  .opponents-grid { order: 1; grid-template-columns: repeat(auto-fill, minmax(105px, 1fr)); gap: 6px; --card-w: 38px; --card-h: 53px; }
+  .opponents-grid { order: 1; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); gap: 6px; --card-w: 38px; --card-h: 53px; }
   .opponents-grid .card-grid { gap: 4px; }
   .opponents-grid .card-value-tl { font-size: 0.75rem; }
   .opponents-grid .card-suit-br { font-size: 0.85rem; }
