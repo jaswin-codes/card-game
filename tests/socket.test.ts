@@ -11,7 +11,7 @@ let serverLog = '';
 
 beforeAll(async () => {
   server = spawn(process.execPath, ['dist/src/server.js'], {
-    env: { ...process.env, PORT: String(PORT), TURN_TIMER_MS: '60000', RECONNECT_MS: '60000' },
+    env: { ...process.env, PORT: String(PORT), TURN_TIMER_MS: '60000', RECONNECT_MS: '60000', EMPTY_ROOM_GRACE_MS: '300' },
     stdio: ['ignore', 'pipe', 'pipe']
   });
   server.stdout!.on('data', d => (serverLog += d));
@@ -286,12 +286,29 @@ describe('Socket server', () => {
     clients.forEach(c => c.close());
   });
 
-  it('an empty lobby is removed', async () => {
+  it('a host refreshing an empty lobby keeps the room', async () => {
+    const host = await Client.connect();
+    host.send({ type: 'CREATE_ROOM', playerName: 'Refresher' });
+    const created = await host.next('ROOM_CREATED');
+    host.close();
+    await new Promise(r => setTimeout(r, 50)); // well inside the grace period
+    const back = await Client.connect();
+    back.send({ type: 'RECONNECT', roomId: created.roomId, playerId: created.playerId, token: created.token });
+    await back.next('RECONNECTED');
+    await new Promise(r => setTimeout(r, 500)); // past the grace period, but someone is connected
+    const probe = await Client.connect();
+    probe.send({ type: 'JOIN_ROOM', roomId: created.roomId, playerName: 'Guest' });
+    await probe.next('ROOM_JOINED');
+    back.close();
+    probe.close();
+  });
+
+  it('an empty lobby is removed after the grace period', async () => {
     const host = await Client.connect();
     host.send({ type: 'CREATE_ROOM', playerName: 'Lonely' });
     const { roomId } = await host.next('ROOM_CREATED');
     host.close();
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise(r => setTimeout(r, 700));
     const probe = await Client.connect();
     probe.send({ type: 'JOIN_ROOM', roomId, playerName: 'Late' });
     expect((await probe.next('ERROR')).error).toBe('Room not found');

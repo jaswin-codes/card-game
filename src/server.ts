@@ -95,6 +95,8 @@ const PORT = Number(process.env.PORT) || 8080;
 // Overridable so tests don't wait 30 s per timeout; production uses the rule defaults
 const TURN_MS = Number(process.env.TURN_TIMER_MS) || 30000; // turn and power timers
 const RECONNECT_MS = Number(process.env.RECONNECT_MS) || 300000;
+// How long an empty lobby or finished game survives, so a page refresh doesn't lose the room
+const EMPTY_ROOM_GRACE_MS = Number(process.env.EMPTY_ROOM_GRACE_MS) || 30000;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIST = path.resolve(__dirname, '../../client/dist');
@@ -673,19 +675,15 @@ function handleDisconnect(clientSession: { session: Session | null }, ws: WebSoc
   cleanupIfEmpty(room);
 }
 
-// Drop a room nobody is connected to: at once in the lobby or after a game,
-// or once the reconnect window has passed mid-game
+// Drop a room nobody is connected to after a grace period: short in the lobby
+// or after a game, a little past the reconnect window mid-game
 function cleanupIfEmpty(room: Room) {
-  if ([...room.players, ...room.spectators].some(s => s.ws)) return;
+  if (room.cleanupTimer || [...room.players, ...room.spectators].some(s => s.ws)) return;
   const inProgress = room.gameState && room.gameState.status !== 'ended';
-  if (!inProgress) {
-    deleteRoom(room);
-  } else if (!room.cleanupTimer) {
-    room.cleanupTimer = setTimeout(() => {
-      room.cleanupTimer = null;
-      if (![...room.players, ...room.spectators].some(s => s.ws)) deleteRoom(room);
-    }, RECONNECT_MS + 60 * 1000); // a little past the reconnect window
-  }
+  room.cleanupTimer = setTimeout(() => {
+    room.cleanupTimer = null;
+    if (![...room.players, ...room.spectators].some(s => s.ws)) deleteRoom(room);
+  }, inProgress ? RECONNECT_MS + 60 * 1000 : EMPTY_ROOM_GRACE_MS);
 }
 
 function deleteRoom(room: Room) {
