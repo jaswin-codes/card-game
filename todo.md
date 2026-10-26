@@ -1,5 +1,9 @@
 # Card Game Project TODO - MVP (2-Player Minimum Viable)
 
+> Note: the MVP list below came from the original template and mentions things the
+> game doesn't use (Socket.io, Manus OAuth, a database). The real game uses plain
+> WebSockets (`src/server.ts`), has no login, and keeps games in memory.
+
 ## Core Game Features (MVP)
 - [x] Database schema for games, players, cards, and game state
 - [x] WebSocket server setup with Socket.io for real-time synchronization
@@ -49,13 +53,13 @@
 - [x] Basic vitest unit tests for game rules
 
 ## Advanced Features (Post-MVP)
-- [ ] Card power system (7, 8, 9, 10, J, Q, K powers)
-- [ ] Jump-In Type 1 (matching card) mechanic
-- [ ] Jump-In Type 2 (knowledge-based steal) mechanic
-- [ ] Full calling system with final turns
-- [ ] Automatic mistake penalties
-- [ ] Manual "Call Mistake" button for player-reported violations
-- [ ] 3-4 player support
-- [ ] In-game chat or emoji reactions
-- [ ] Player stats and match history
-- [ ] Different background themes
+- [x] Card power system (7, 8, 9, 10, J, Q, K powers)
+- [x] Jump-In Type 1 (matching card) mechanic
+- [x] Jump-In Type 2 (knowledge-based steal) mechanic
+- [x] Full calling system with final turns
+- [x] Automatic mistake penalties
+- [x] Manual "Call Mistake" button for player-reported violations
+- [x] 3-4 player support
+- [x] In-game chat or emoji reactions
+- [x] Player stats and match history
+- [x] Different background themes
