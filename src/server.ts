@@ -37,6 +37,7 @@ interface Room {
   turnTimer: NodeJS.Timeout | null;
   powerTimer: NodeJS.Timeout | null;
   reconnectTimers: Record<string, NodeJS.Timeout>;
+  cleanupTimer: NodeJS.Timeout | null;
 }
 
 // Actions a client may send; setup, timer and connection actions are server-only
@@ -78,10 +79,22 @@ const ACTION_LABELS: Record<string, string> = {
   CALL: 'call'
 };
 
-const rooms: Record<string, Room> = {};
-const sessions: Record<string, Session> = {}; // token -> Session
+// Prototype-free maps, so ids like "__proto__" from clients can't hit Object.prototype
+const rooms: Record<string, Room> = Object.create(null);
+const sessions: Record<string, Session> = Object.create(null); // token -> Session
+
+const NAME_MAX_LENGTH = 20;
+const MAX_MESSAGE_BYTES = 16 * 1024;
+
+function cleanName(name: unknown, fallback: string): string {
+  const trimmed = typeof name === 'string' ? name.trim().slice(0, NAME_MAX_LENGTH) : '';
+  return trimmed || fallback;
+}
 
 const PORT = Number(process.env.PORT) || 8080;
+// Overridable so tests don't wait 30 s per timeout; production uses the rule defaults
+const TURN_MS = Number(process.env.TURN_TIMER_MS) || 30000; // turn and power timers
+const RECONNECT_MS = Number(process.env.RECONNECT_MS) || 300000;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIST = path.resolve(__dirname, '../../client/dist');
@@ -135,7 +148,7 @@ const server = createServer((req, res) => {
     res.writeHead(500).end('Internal server error');
   }
 });
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
 
 // Broadcast game state to all clients in a room
 function broadcastRoomState(room: Room) {
@@ -195,7 +208,7 @@ function startTurnTimer(room: Room) {
     } catch (err) {
       console.error(`[Timer] Unhandled error in turn timer for room ${room.id}:`, err);
     }
-  }, 30000); // 30 seconds
+  }, TURN_MS);
 }
 
 function startPowerTimer(room: Room) {
@@ -218,7 +231,7 @@ function startPowerTimer(room: Room) {
     } catch (err) {
       console.error(`[Timer] Unhandled error in power timer for room ${room.id}:`, err);
     }
-  }, 30000); // 30 seconds
+  }, TURN_MS);
 }
 
 // Handle client messages
@@ -243,6 +256,10 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
     ws.send(JSON.stringify({ type: 'ERROR', error: 'Invalid JSON format' }));
     return;
   }
+  if (!message || typeof message !== 'object' || typeof message.type !== 'string') {
+    ws.send(JSON.stringify({ type: 'ERROR', error: 'Invalid message' }));
+    return;
+  }
 
   const timestamp = Date.now();
 
@@ -254,7 +271,7 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
 
       const session: Session = {
         playerId,
-        name: message.playerName || 'Player 1',
+        name: cleanName(message.playerName, 'Player 1'),
         token,
         roomId,
         isSpectator: false,
@@ -273,7 +290,8 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
         spectators: [],
         turnTimer: null,
         powerTimer: null,
-        reconnectTimers: {}
+        reconnectTimers: {},
+        cleanupTimer: null
       };
 
       ws.send(
@@ -289,7 +307,8 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
     }
 
     case 'JOIN_ROOM': {
-      const { roomId, playerName, isSpectator } = message;
+      const { playerName, isSpectator } = message;
+      const roomId = typeof message.roomId === 'string' ? message.roomId.trim().toUpperCase() : '';
       const room = rooms[roomId];
       if (!room) {
         ws.send(JSON.stringify({ type: 'ERROR', error: 'Room not found' }));
@@ -302,7 +321,7 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
 
       const session: Session = {
         playerId,
-        name: playerName || `Player ${room.players.length + 1}`,
+        name: cleanName(playerName, `Player ${room.players.length + 1}`),
         token,
         roomId,
         isSpectator: joinAsSpectator,
@@ -495,6 +514,14 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
         return;
       }
 
+      if (room.cleanupTimer) {
+        clearTimeout(room.cleanupTimer);
+        room.cleanupTimer = null;
+      }
+      if (session.isSpectator && !room.spectators.includes(session)) {
+        room.spectators.push(session);
+      }
+
       // A lobby player who dropped (e.g. page refresh) gets their seat back
       if (!room.gameState && !session.isSpectator && !room.players.includes(session)) {
         if (room.players.length >= 4) {
@@ -539,9 +566,10 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
 }
 
 // Handle client disconnections
-function handleDisconnect(clientSession: { session: Session | null }) {
+function handleDisconnect(clientSession: { session: Session | null }, ws: WebSocket) {
   const session = clientSession.session;
-  if (!session) return;
+  // Ignore sockets the session has already moved off (reconnected elsewhere, or close after error)
+  if (!session || session.ws !== ws) return;
 
   const room = rooms[session.roomId];
   if (!room) return;
@@ -550,6 +578,7 @@ function handleDisconnect(clientSession: { session: Session | null }) {
 
   if (session.isSpectator) {
     room.spectators = room.spectators.filter(s => s.playerId !== session.playerId);
+    cleanupIfEmpty(room);
     return;
   }
 
@@ -635,12 +664,41 @@ function handleDisconnect(clientSession: { session: Session | null }) {
         console.error(`[Reconnect] Error eliminating player ${session.playerId}:`, err);
         delete room.reconnectTimers[session.playerId];
       }
-    }, 300000); // 5 minutes
+    }, RECONNECT_MS);
   } else {
     // If game has not started yet, simply remove player from lobby
     room.players = room.players.filter(p => p.playerId !== session.playerId);
     broadcastRoomState(room);
   }
+  cleanupIfEmpty(room);
+}
+
+// Drop a room nobody is connected to: at once in the lobby or after a game,
+// or once the reconnect window has passed mid-game
+function cleanupIfEmpty(room: Room) {
+  if ([...room.players, ...room.spectators].some(s => s.ws)) return;
+  const inProgress = room.gameState && room.gameState.status !== 'ended';
+  if (!inProgress) {
+    deleteRoom(room);
+  } else if (!room.cleanupTimer) {
+    room.cleanupTimer = setTimeout(() => {
+      room.cleanupTimer = null;
+      if (![...room.players, ...room.spectators].some(s => s.ws)) deleteRoom(room);
+    }, RECONNECT_MS + 60 * 1000); // a little past the reconnect window
+  }
+}
+
+function deleteRoom(room: Room) {
+  if (room.turnTimer) clearTimeout(room.turnTimer);
+  if (room.powerTimer) clearTimeout(room.powerTimer);
+  if (room.cleanupTimer) clearTimeout(room.cleanupTimer);
+  Object.values(room.reconnectTimers).forEach(clearTimeout);
+  // Includes lobby players who left, whose sessions are no longer in room.players
+  for (const [token, s] of Object.entries(sessions)) {
+    if (s.roomId === room.id) delete sessions[token];
+  }
+  delete rooms[room.id];
+  console.log(`[Room] ${room.id} closed (empty)`);
 }
 
 // Websocket setup
@@ -658,12 +716,12 @@ wss.on('connection', ws => {
   });
 
   ws.on('close', () => {
-    handleDisconnect(clientSession);
+    handleDisconnect(clientSession, ws);
   });
 
   ws.on('error', err => {
     console.error(`Socket error:`, err);
-    handleDisconnect(clientSession);
+    handleDisconnect(clientSession, ws);
   });
 });
 
