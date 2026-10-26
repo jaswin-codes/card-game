@@ -6,8 +6,8 @@
 
 ### Tests and build (at the tip of the branch)
 
-- `npm test`: **86 passed** in 7 files (31 tests at the start of the night). `npm test` now compiles the server first.
-  - Rules: powers 17, jump-ins 12, calling 7, mistakes 8, older engine suite 32.
+- `npm test`: **91 passed** in 7 files (31 tests at the start of the night). `npm test` now compiles the server first.
+  - Rules: powers 17, jump-ins 17 (including faked race claims), calling 7, mistakes 8, older engine suite 32.
   - **Simulation**: 1,500 seeded random games (2–4 players), checking after every move that no card is lost or duplicated, slots stay valid, eliminated players and the caller never get the turn, every game ends, and no player is ever sent a card they shouldn't see.
   - **Socket tests** (9): the real server is started and driven by real WebSocket clients: a full 3-player game, reconnecting, a disconnect during a jump-in window, malformed and oversized input, chat limits, Call Mistake and room cleanup.
 - `npm run build:all`: passes.
@@ -18,7 +18,7 @@
 | # | Task | State |
 |---|------|-------|
 | 1 | Card powers | Done. The King now looks first, then you choose to swap; any power can be skipped. |
-| 2–3 | Jump-ins, both types | Done. Losing a jump-in race is no longer penalised. |
+| 2–3 | Jump-ins, both types | Done. Losing a genuine jump-in race is no longer penalised; the server checks the claim against its own record. |
 | 4 | Calling and final turns | Done. Fixed turn order when someone is eliminated in the final round. |
 | 5 | Automatic penalties | Done. Fixed penalty cards getting an undefined or duplicate slot; everyone now sees who was penalised and why. |
 | 6 | Call Mistake | Done. The server checks the accused player's last move and posts the verdict in chat (see Assumptions). |
@@ -41,6 +41,8 @@ Before tonight, a player could read hidden information out of the data the serve
 - **Every player's live score**: the total of each player's hidden cards was sent to everyone.
 
 Both are fixed, and the simulation and socket tests now check for leaks. An eliminated player also no longer keeps seeing cards.
+
+A late review also caught a hole I'd added myself: the no-penalty "lost a race" excuse trusted the card id the client sent, so a modified client could jump in blind for free. The server now accepts the excuse only if its own record of the last five top discards backs it up. Tests cover invented and old ids.
 
 ### Other bugs found and fixed
 
@@ -86,7 +88,7 @@ Use separate addresses for each player on one computer: http://localhost:8080, h
 
 ## Status
 
-All tasks done (86 tests passing, build OK). Draft PR #1 is ready for review.
+All tasks done (91 tests passing, build OK). Draft PR #1 is ready for review.
 
 ## Baseline (Step 0)
 
@@ -142,7 +144,7 @@ todo.md describes the old Manus template (Socket.io, OAuth, drizzle); the real g
 - **Powers are optional.** The rules say you "may" activate a power, so there's a Skip Power button; skipping ends the turn.
 - **King = look, then decide.** The rules say look at both cards "then decide", so the King is two steps. After looking you must swap or keep those same two cards.
 - **Seen cards stay visible to you.** Once you've legitimately seen a card (bottom two at the start, 7/8, 9/10, King, or a card taken from the discard), its value stays on your screen. The physical game expects you to memorise; showing it is kinder online, and Type 2 jump-ins need the knowledge anyway. Easy to change if you want memory to matter: hide values on the client after a few seconds.
-- **Jump-in races.** The client sends the id of the discard it reacted to. If someone else got there first and your card still matches the new top card, your jump goes through (the rules allow chaining). If it no longer matches, it's rejected as "too late" with **no penalty** — you matched the card you saw.
+- **Jump-in races.** If someone else got there first and your card still matches the new top card, your jump goes through (the rules allow chaining). If it no longer matches, it's rejected as "too late" with **no penalty**, but only when the server can confirm the race: for Type 1, the card you reacted to was one of the last five top discards and matched your card; for Type 2, the exact card you targeted was itself just jumped. Anything else is penalised as normal.
 - **Penalty card slot.** A penalty card fills the first empty slot, refilling a gap left by a jump-in before opening a new penalty slot.
 - **Turn timer.** Running out of time is penalised with a card (this was in the engine before tonight; the rules list it under online timers but not under Mistakes). Kept as is.
 - **"Call Mistake".** The server already penalises every rule break it can detect, and the online game makes illegal peeking, moving cards and revealing cards impossible. So the button asks the server to check the accused player's last move and posts the verdict in chat. Nobody is penalised by a call, including for a false accusation (the rules don't cover that).
