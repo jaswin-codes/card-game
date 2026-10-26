@@ -206,6 +206,36 @@ function ChatPanel({ lines, myId, onSend, onReact }: {
   );
 }
 
+const THEMES = [
+  { id: 'midnight', label: 'Midnight', swatch: '#6366f1' },
+  { id: 'felt',     label: 'Felt',     swatch: '#16a34a' },
+  { id: 'crimson',  label: 'Crimson',  swatch: '#dc2626' },
+  { id: 'ocean',    label: 'Ocean',    swatch: '#0ea5e9' },
+];
+
+// localStorage can throw (private mode, blocked storage); the game works without it
+function readStored(key: string): string | null {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+function writeStored(key: string, value: string) {
+  try { localStorage.setItem(key, value); } catch { /* not saved */ }
+}
+function removeStored(key: string) {
+  try { localStorage.removeItem(key); } catch { /* nothing stored */ }
+}
+
+function ThemePicker({ theme, onChange }: { theme: string; onChange: (t: string) => void }) {
+  return (
+    <div className="theme-picker">
+      Theme
+      {THEMES.map(t => (
+        <button key={t.id} className={`theme-swatch ${theme === t.id ? 'active' : ''}`} style={{ background: t.swatch }}
+          onClick={() => onChange(t.id)} title={t.label} aria-label={`${t.label} theme`} aria-pressed={theme === t.id} />
+      ))}
+    </div>
+  );
+}
+
 /** Toast notification */
 function Toast({ msg, kind }: { msg: string; kind: 'error'|'info'|'success' }) {
   return <div className={`toast ${kind}`}>{msg}</div>;
@@ -236,6 +266,12 @@ export default function App() {
   const [discardClickMode, setDiscardClickMode] = useState(false); // waiting for own card to swap with discard
   const [jumpMode,         setJumpMode]         = useState<'own'|'opp'|null>(null); // armed jump-in type
   const [chat,             setChat]             = useState<ChatLine[]>([]);
+  const [theme,            setTheme]            = useState(() => readStored('cg_theme') ?? 'midnight');
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    writeStored('cg_theme', theme);
+  }, [theme]);
   const [peekPositions,    setPeekPositions]    = useState<Set<string>>(new Set()); // "{playerId}:{pos}" currently peeking
   const [reconnCountdown,  setReconnCountdown]  = useState(300);
 
@@ -307,9 +343,9 @@ export default function App() {
         setMyId(data.playerId);
         setHostId(data.playerId);
         setLobbyPlayers(data.players ?? []);
-        localStorage.setItem('cg_token',  data.token);
-        localStorage.setItem('cg_room',   data.roomId);
-        localStorage.setItem('cg_player', data.playerId);
+        writeStored('cg_token',  data.token);
+        writeStored('cg_room',   data.roomId);
+        writeStored('cg_player', data.playerId);
         break;
 
       case 'ROOM_JOINED':
@@ -319,9 +355,9 @@ export default function App() {
         setIsSpectator(data.isSpectator ?? false);
         setLobbyPlayers(data.players ?? []);
         setHostId(data.players?.[0]?.id ?? null);
-        localStorage.setItem('cg_token',  data.token);
-        localStorage.setItem('cg_room',   data.roomId);
-        localStorage.setItem('cg_player', data.playerId);
+        writeStored('cg_token',  data.token);
+        writeStored('cg_room',   data.roomId);
+        writeStored('cg_player', data.playerId);
         break;
 
       case 'RECONNECTED':
@@ -363,9 +399,9 @@ export default function App() {
       }
 
       case 'RECONNECT_FAILED':
-        localStorage.removeItem('cg_token');
-        localStorage.removeItem('cg_room');
-        localStorage.removeItem('cg_player');
+        removeStored('cg_token');
+        removeStored('cg_room');
+        removeStored('cg_player');
         wsRef.current?.close();
         setJoinedRoom(null); setMyId(null); setToken(null); setGs(null);
         showToast(data.error ?? 'Could not rejoin room', 'error');
@@ -399,9 +435,9 @@ export default function App() {
 
   // ─── Session restore on mount
   useEffect(() => {
-    const tok = localStorage.getItem('cg_token');
-    const rm  = localStorage.getItem('cg_room');
-    const pid = localStorage.getItem('cg_player');
+    const tok = readStored('cg_token');
+    const rm  = readStored('cg_room');
+    const pid = readStored('cg_player');
     if (tok && rm && pid) {
       setToken(tok); setJoinedRoom(rm); setMyId(pid);
       openWs(ws => ws.send(JSON.stringify({ type: 'RECONNECT', roomId: rm, playerId: pid, token: tok })));
@@ -441,9 +477,9 @@ export default function App() {
   );
 
   const handleLeave = () => {
-    localStorage.removeItem('cg_token');
-    localStorage.removeItem('cg_room');
-    localStorage.removeItem('cg_player');
+    removeStored('cg_token');
+    removeStored('cg_room');
+    removeStored('cg_player');
     wsRef.current?.close();
     setJoinedRoom(null); setMyId(null); setToken(null);
     setGs(null); setConnState('disconnected'); setChat([]);
@@ -632,6 +668,7 @@ export default function App() {
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', letterSpacing: '.2em', textTransform: 'uppercase' }}>
               Card Game
             </div>
+            <div style={{ marginTop: 10 }}><ThemePicker theme={theme} onChange={setTheme} /></div>
           </div>
 
           {!joinedRoom && (<>
@@ -1075,6 +1112,7 @@ export default function App() {
             )}
           </div>
           {chatPanel}
+          <ThemePicker theme={theme} onChange={setTheme} />
         </div>
       </div>
     </div>
