@@ -452,6 +452,39 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
       break;
     }
 
+    case 'REPORT_MISTAKE': {
+      // Every detectable violation is already penalised automatically, so a
+      // manual call checks the accused player's last action against the
+      // server's record and announces the verdict. No one is penalised by it.
+      const session = clientSession.session;
+      const room = session && rooms[session.roomId];
+      if (!session || !room || !room.gameState || session.isSpectator) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'Only players in a game can call a mistake' }));
+        return;
+      }
+      const accused = room.players.find(p => p.playerId === message.accused_id);
+      if (!accused || accused === session) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'Pick another player' }));
+        return;
+      }
+      session.chatTimes = session.chatTimes.filter(t => timestamp - t < CHAT_WINDOW_MS);
+      if (session.chatTimes.length >= CHAT_MAX_PER_WINDOW) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'Slow down — too many messages' }));
+        return;
+      }
+      session.chatTimes.push(timestamp);
+
+      const last = accused.lastAction;
+      const label = last ? ACTION_LABELS[last.type] ?? last.type : '';
+      const verdict = !last
+        ? `${accused.name} hasn't made a move yet.`
+        : last.ok
+          ? `${accused.name}'s last move (${label}) was legal.`
+          : `${accused.name}'s last move (${label}) was already rejected: ${last.error}.`;
+      broadcastChat(room, null, 'system', `${session.name} called a mistake on ${accused.name}. Server check: ${verdict}`);
+      break;
+    }
+
     case 'RECONNECT': {
       const { roomId, playerId, token } = message;
       const room = rooms[roomId];

@@ -842,6 +842,12 @@ export default function App() {
                       <span>{p.cards.length} cards</span>
                       {p.mistake_count > 0 && <span className="badge badge-red">{p.mistake_count} mistakes</span>}
                       {p.connection_status !== 'connected' && <span className="badge badge-muted">{p.connection_status}</span>}
+                      {!isSpectator && p.connection_status !== 'eliminated' && (
+                        <button className="btn btn-ghost btn-xs" onClick={() => send({ type: 'REPORT_MISTAKE', accused_id: p.id })}
+                          title="Ask the server to check this player's last move">
+                          Call Mistake
+                        </button>
+                      )}
                     </div>
                   </div>
                   {renderGrid(p)}
