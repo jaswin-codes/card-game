@@ -867,3 +867,36 @@ body {
 .stats-history { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 0.75rem; }
 .stats-match { display: grid; grid-template-columns: 1.4fr 1fr 0.8fr 0.6fr; gap: 6px; color: var(--text-dim); }
 .stats-match .win { color: var(--accent-gold); font-weight: 700; }
+
+/* Table layout */
+.table-col { display: flex; flex-direction: column; gap: 10px; }
+.opponents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+
+/* Phones: smaller cards, opponents two-up, and the piles between the
+   opponents and your own cards so a turn needs no scrolling back and forth */
+@media (max-width: 600px) {
+  :root { --card-w: 52px; --card-h: 73px; --card-radius: 8px; }
+  .card-value-tl { font-size: 1rem; }
+  .card-suit-br { font-size: 1.2rem; }
+  .table-col { display: contents; }
+  .opponents-grid { order: 1; grid-template-columns: repeat(auto-fill, minmax(105px, 1fr)); gap: 6px; --card-w: 38px; --card-h: 53px; }
+  .opponents-grid .card-grid { gap: 4px; }
+  .opponents-grid .card-value-tl { font-size: 0.75rem; }
+  .opponents-grid .card-suit-br { font-size: 0.85rem; }
+  .center-board { display: contents; }
+  .center-board > * { order: 2; }
+  .your-section { order: 3; }
+  .center-board > .chat-panel { order: 4; }
+  .center-board > .theme-picker { order: 5; }
+  .opponents-grid .player-section { padding: 6px; min-width: 0; }
+  .opponents-grid .player-header { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .opponents-grid .player-meta { flex-wrap: wrap; gap: 3px; font-size: 0.6rem; }
+  .opponents-grid .player-name { font-size: 0.75rem; flex-wrap: wrap; overflow-wrap: anywhere; gap: 3px; }
+  .player-header { margin-bottom: 6px; }
+  .player-section .badge { font-size: 0.55rem; padding: 1px 5px; }
+  .opponents-grid .btn-xs { font-size: 0.55rem; padding: 2px 5px; }
+  .your-section { padding: 10px; }
+  .jump-window-bar { margin-bottom: 6px; }
+  .piles-area { flex-direction: row; justify-content: center; padding: 8px; }
+  .board-header { padding: 8px 10px; }
+}

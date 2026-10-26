@@ -927,10 +927,10 @@ export default function App() {
       {/* ── Main area ── */}
       <div className="game-area">
         {/* Left: opponents + my grid */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div className="table-col">
 
           {/* Opponents */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 10 }}>
+          <div className="opponents-grid">
             {opponents.map(p => {
               const isActive  = p.id === activePlayerId;
               const isCaller  = p.id === gs.caller_id;
