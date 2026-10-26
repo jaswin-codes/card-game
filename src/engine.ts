@@ -147,39 +147,32 @@ export function applyMistake(state: GameState, playerId: string, timestamp: numb
     // 9th card would be added -> auto-elimination
     player.connection_status = 'eliminated';
     player.is_spectator = true;
-    // Discard all their cards to the bottom of the discard pile
-    newState.discard_pile = [...player.cards.map(c => ({ ...c, face_up: true })), ...newState.discard_pile];
+    // Their cards and the 9th card go face up to the bottom of the discard pile
+    newState.discard_pile = [...[...player.cards, penaltyCard].map(c => ({ ...c, face_up: true })), ...newState.discard_pile];
     player.cards = [];
     player.score = 0;
     newState.players[playerId] = player;
 
-    // Check if game ends due to too few players
     const activePlayers = newState.player_order.filter(id => {
       const p = newState.players[id];
       return p && p.connection_status !== 'eliminated' && !p.is_spectator;
     });
 
-    if (activePlayers.length <= 1) {
-      newState.status = 'ended';
-      // Determine winners
-      let minScore = Infinity;
-      let winners: string[] = [];
-      for (const id of newState.player_order) {
-        const p = newState.players[id];
-        if (p.connection_status !== 'eliminated' && !p.is_spectator) {
-          const s = calculatePlayerScore(p);
-          if (s < minScore) {
-            minScore = s;
-            winners = [id];
-          } else if (s === minScore) {
-            winners.push(id);
-          }
-        }
+    if (activePlayers.length <= 1 || (newState.status === 'final_round' && allFinalTurnsTaken(newState))) {
+      return endRound(newState);
+    }
+
+    if (newState.player_order[newState.current_player_index] === playerId) {
+      // The eliminated player was mid-turn: an undecided drawn card goes to the discard pile
+      if (newState.drawn_card) {
+        const discarded = { ...newState.drawn_card, face_up: true };
+        newState.discard_pile = [...newState.discard_pile, discarded];
+        newState.last_discard_card = discarded;
+        newState.last_discard_player_id = playerId;
+        newState.drawn_card = null;
       }
-      newState.winner_ids = winners;
-    } else if (newState.player_order[newState.current_player_index] === playerId) {
-      // If the active player was eliminated, pass turn
-      newState.current_player_index = getNextPlayerIndex(newState.current_player_index, newState.player_order, newState.players);
+      newState.active_power = null;
+      newState.current_player_index = nextTurnIndex(newState);
       newState.turn_phase = 'action_choice';
       newState.turn_timer_start = timestamp;
     }
@@ -1059,61 +1052,69 @@ function completeTurn(state: GameState, playerId: string, timestamp: number): Ac
       nextState.players[playerId] = { ...nextState.players[playerId], took_final_turn: true };
     }
 
-    // Check if everyone has taken their final turn
-    const otherPlayers = nextState.player_order.filter(id => id !== nextState.caller_id);
-    const allFinished = otherPlayers.every(id => {
-      const p = nextState.players[id];
-      return !p || p.connection_status === 'eliminated' || p.is_spectator || p.took_final_turn;
-    });
-
-    if (allFinished) {
-      nextState.status = 'ended';
-      // Flip all cards face up (replace player objects — never mutate shared ones)
-      for (const id of nextState.player_order) {
-        const p = nextState.players[id];
-        nextState.players[id] = {
-          ...p,
-          cards: p.cards.map(c => ({ ...c, face_up: true })),
-          score: calculatePlayerScore(p)
-        };
-      }
-
-      // Calculate winners
-      let minScore = Infinity;
-      let candidates: string[] = [];
-
-      for (const id of nextState.player_order) {
-        const p = nextState.players[id];
-        if (p.connection_status !== 'eliminated' && !p.is_spectator) {
-          const s = calculatePlayerScore(p);
-          if (s < minScore) {
-            minScore = s;
-            candidates = [id];
-          } else if (s === minScore) {
-            candidates.push(id);
-          }
-        }
-      }
-
-      // Tiebreaker rule: If caller is among the tied lowest scorers, caller wins solely
-      if (nextState.caller_id && candidates.includes(nextState.caller_id)) {
-        nextState.winner_ids = [nextState.caller_id];
-      } else {
-        nextState.winner_ids = candidates;
-      }
-
-      return { state: nextState, success: true };
+    if (allFinalTurnsTaken(nextState)) {
+      return { state: endRound(nextState), success: true };
     }
   }
 
   // Advance turn to next active player
-  nextState.current_player_index = getNextPlayerIndex(
-    nextState.current_player_index,
-    nextState.player_order,
-    nextState.players
-  );
+  nextState.current_player_index = nextTurnIndex(nextState);
   nextState.turn_phase = 'action_choice';
   nextState.turn_timer_start = timestamp;
 
   return { state: nextState, success: true };
+}
+
+// Next player to act; in the final round the caller and players who already
+// had their final turn are skipped
+function nextTurnIndex(state: GameState): number {
+  let idx = state.current_player_index;
+  for (let i = 0; i < state.player_order.length; i++) {
+    idx = getNextPlayerIndex(idx, state.player_order, state.players);
+    const id = state.player_order[idx];
+    if (state.status !== 'final_round' || (id !== state.caller_id && !state.players[id].took_final_turn)) return idx;
+  }
+  return idx;
+}
+
+function allFinalTurnsTaken(state: GameState): boolean {
+  return state.player_order
+    .filter(id => id !== state.caller_id)
+    .every(id => {
+      const p = state.players[id];
+      return !p || p.connection_status === 'eliminated' || p.is_spectator || p.took_final_turn;
+    });
+}
+
+// Flip every card face up, score, and pick winners (the caller wins ties)
+export function endRound(state: GameState): GameState {
+  const players = { ...state.players };
+  for (const id of state.player_order) {
+    const p = players[id];
+    players[id] = { ...p, cards: p.cards.map(c => ({ ...c, face_up: true })), score: calculatePlayerScore(p) };
+  }
+
+  let minScore = Infinity;
+  let candidates: string[] = [];
+  for (const id of state.player_order) {
+    const p = players[id];
+    if (p.connection_status === 'eliminated' || p.is_spectator) continue;
+    const s = calculatePlayerScore(p);
+    if (s < minScore) {
+      minScore = s;
+      candidates = [id];
+    } else if (s === minScore) {
+      candidates.push(id);
+    }
+  }
+
+  const callerWins = !!state.caller_id && candidates.includes(state.caller_id);
+  return {
+    ...state,
+    players,
+    status: 'ended',
+    drawn_card: null,
+    active_power: null,
+    winner_ids: callerWins ? [state.caller_id!] : candidates
+  };
 }
