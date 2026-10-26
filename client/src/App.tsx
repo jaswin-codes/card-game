@@ -31,7 +31,7 @@ interface Player {
   id: string;
   name: string;
   cards: Card[];
-  score: number;
+  score: number | null; // hidden (null) until the game ends
   has_called: boolean;
   mistake_count: number;
   connection_status: 'connected' | 'disconnected' | 'eliminated';
@@ -224,6 +224,54 @@ function removeStored(key: string) {
   try { localStorage.removeItem(key); } catch { /* nothing stored */ }
 }
 
+// Stats live in this browser only: the server keeps no database
+interface MatchRecord { at: number; players: number; score: number; won: boolean; called: boolean }
+interface Stats { games: number; wins: number; totalScore: number; history: MatchRecord[] }
+const STATS_KEY = 'cg_stats';
+const HISTORY_SIZE = 20;
+
+function loadStats(): Stats {
+  try {
+    const s = JSON.parse(readStored(STATS_KEY) ?? '');
+    if (typeof s?.games === 'number' && Array.isArray(s.history)) return s;
+  } catch { /* missing or corrupt: start fresh */ }
+  return { games: 0, wins: 0, totalScore: 0, history: [] };
+}
+
+function addMatch(stats: Stats, m: MatchRecord): Stats {
+  return {
+    games: stats.games + 1,
+    wins: stats.wins + (m.won ? 1 : 0),
+    totalScore: stats.totalScore + m.score,
+    history: [m, ...stats.history].slice(0, HISTORY_SIZE),
+  };
+}
+
+function StatsPanel({ stats }: { stats: Stats }) {
+  if (stats.games === 0) return null;
+  return (
+    <div className="stats-panel">
+      <div className="stats-title">Your stats (this browser)</div>
+      <div className="stats-row">
+        <div><strong>{stats.games}</strong><span>games</span></div>
+        <div><strong>{stats.wins}</strong><span>wins</span></div>
+        <div><strong>{Math.round((stats.wins / stats.games) * 100)}%</strong><span>win rate</span></div>
+        <div><strong>{(stats.totalScore / stats.games).toFixed(1)}</strong><span>avg pts</span></div>
+      </div>
+      <div className="stats-history">
+        {stats.history.slice(0, 5).map(m => (
+          <div key={m.at} className="stats-match">
+            <span>{new Date(m.at).toLocaleDateString()}</span>
+            <span>{m.players}p{m.called ? ' · called' : ''}</span>
+            <span>{m.score} pts</span>
+            <span className={m.won ? 'win' : ''}>{m.won ? 'Won' : 'Lost'}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ThemePicker({ theme, onChange }: { theme: string; onChange: (t: string) => void }) {
   return (
     <div className="theme-picker">
@@ -267,6 +315,8 @@ export default function App() {
   const [jumpMode,         setJumpMode]         = useState<'own'|'opp'|null>(null); // armed jump-in type
   const [chat,             setChat]             = useState<ChatLine[]>([]);
   const [theme,            setTheme]            = useState(() => readStored('cg_theme') ?? 'midnight');
+  const [stats,            setStats]            = useState<Stats>(loadStats);
+  const lastStatusRef = useRef<string | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -304,6 +354,25 @@ export default function App() {
     timerIntervalRef.current = setInterval(tick, 500);
     return () => clearInterval(timerIntervalRef.current);
   }, [gs]);
+
+  // ─── Record a finished match once, when this client sees the game end
+  useEffect(() => {
+    const status = gs?.status ?? null;
+    const prev = lastStatusRef.current;
+    lastStatusRef.current = status;
+    if (status !== 'ended' || !prev || prev === 'ended' || !gs || !myId || isSpectator) return;
+    const me = gs.players[myId];
+    if (!me || me.score === null) return;
+    const next = addMatch(loadStats(), {
+      at: Date.now(),
+      players: gs.player_order.length,
+      score: me.score,
+      won: gs.winner_ids.includes(myId),
+      called: gs.caller_id === myId,
+    });
+    writeStored(STATS_KEY, JSON.stringify(next));
+    setStats(next);
+  }, [gs, myId, isSpectator]);
 
   // ─── Reconnect timer
   useEffect(() => {
@@ -711,6 +780,7 @@ export default function App() {
           <button className="btn btn-purple w-full" onClick={() => joinRoom(true)} disabled={!playerName.trim() || !roomCode.trim()}>
             👁 Spectate
           </button>
+          <StatsPanel stats={stats} />
           </>)}
 
           {/* Waiting lobby players */}
@@ -748,7 +818,7 @@ export default function App() {
   if (gs.status === 'ended') {
     const sorted = gs.player_order
       .map(id => gs.players[id])
-      .sort((a, b) => a.score - b.score);
+      .sort((a, b) => (a.score ?? 0) - (b.score ?? 0));
 
     return (
       <div className="screen-center">
