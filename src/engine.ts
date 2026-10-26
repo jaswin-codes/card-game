@@ -1033,7 +1033,9 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
           };
         }
 
-        if (state.players[activePlayerId]?.connection_status !== 'eliminated') {
+        // No penalty for eliminated players, or for disconnected ones: they have
+        // 5 minutes to reconnect, and a card per missed turn would eliminate them first
+        if (state.players[activePlayerId]?.connection_status === 'connected') {
           nextGameState = applyMistake(nextGameState, activePlayerId, timestamp, randomFn);
         }
         if (nextGameState.status === 'ended') {
