@@ -194,9 +194,12 @@ describe('Socket server', () => {
     const second = await Client.connect();
     second.send({ type: 'RECONNECT', roomId: b.roomId, playerId: b.playerId, token: b.token });
     await second.next('RECONNECTED');
-    a.clear();
     b.close(); // the stale socket
     await new Promise(r => setTimeout(r, 300));
+    // Force a fresh broadcast so the check reads the server's current view
+    const seen = a.states.length;
+    a.action({ type: 'LOOK_BOTTOM_CARDS' });
+    await a.until(() => a.states.length > seen);
     expect(a.state.players[b.playerId].connection_status).toBe('connected');
     a.close();
     second.close();
