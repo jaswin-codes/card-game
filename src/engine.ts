@@ -179,8 +179,9 @@ export function applyMistake(state: GameState, playerId: string, timestamp: numb
     return newState;
   }
 
-  // Assign slot
-  const nextSlot = PENALTY_POSITIONS[currentCardsCount - 4];
+  // First empty slot: a gap left by a jump-in is refilled before a new penalty slot
+  const taken = new Set(player.cards.map(c => c.position));
+  const nextSlot = [...STARTING_POSITIONS, ...PENALTY_POSITIONS].find(pos => !taken.has(pos))!;
   const assignedCard: Card = {
     ...penaltyCard,
     position: nextSlot,
@@ -259,7 +260,8 @@ export function createInitialState(playerIds: string[], dealerId?: string, rando
     jump_in_window_open: true,
     active_power: null,
     turn_timer_start: null,
-    winner_ids: []
+    winner_ids: [],
+    mistake_log: []
   };
 }
 
@@ -269,7 +271,7 @@ export function transition(state: GameState, action: Action, timestamp: number, 
     return { state, success: false, error: 'Invalid action' };
   }
 
-  const result = runAction(state, action, timestamp, randomFn);
+  const result = logMistakes(state, action, runAction(state, action, timestamp, randomFn), timestamp);
 
   // Immutability contract: a returned state must never share its players map
   // object with the input state, so callers can safely persist/compare either.
@@ -277,6 +279,21 @@ export function transition(state: GameState, action: Action, timestamp: number, 
     return { ...result, state: { ...result.state, players: { ...result.state.players } } };
   }
   return result;
+}
+
+const MISTAKE_LOG_SIZE = 20;
+
+function logMistakes(before: GameState, action: Action, result: ActionResponse, timestamp: number): ActionResponse {
+  if (result.state === before) return result;
+  const reason =
+    result.error ??
+    (action.type === 'FORCE_TIMER_EXPIRY' ? 'Ran out of time' : action.type === 'FORCE_MISTAKE' ? action.mistake_type : 'Mistake');
+  const entries = Object.keys(result.state.players)
+    .filter(id => result.state.players[id].mistake_count > (before.players[id]?.mistake_count ?? 0))
+    .map(player_id => ({ player_id, reason, timestamp }));
+  if (entries.length === 0) return result;
+  const log = [...(result.state.mistake_log ?? []), ...entries].slice(-MISTAKE_LOG_SIZE);
+  return { ...result, state: { ...result.state, mistake_log: log } };
 }
 
 function runAction(state: GameState, action: Action, timestamp: number, randomFn: () => number): ActionResponse {

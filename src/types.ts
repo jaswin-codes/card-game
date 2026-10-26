@@ -67,6 +67,14 @@ export interface GameState {
   // Timers/Logs
   turn_timer_start: number | null;
   winner_ids: string[];
+  // Recent penalties, newest last, so every player can see who was penalised and why
+  mistake_log: MistakeEntry[];
+}
+
+export interface MistakeEntry {
+  player_id: string;
+  reason: string;
+  timestamp: number;
 }
 
 // State Machine Actions

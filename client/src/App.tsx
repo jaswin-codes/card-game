@@ -61,6 +61,7 @@ interface MaskedGameState {
   active_power: PowerState | null;
   turn_timer_start: number | null;
   winner_ids: string[];
+  mistake_log?: { player_id: string; reason: string; timestamp: number }[];
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -198,6 +199,10 @@ export default function App() {
   const reconnTimerRef     = useRef<any>(null);
   const toastTimerRef      = useRef<any>(null);
   const turnKeyRef         = useRef<string>(''); // "{player index}:{phase}" of last state
+  const mistakeCountRef    = useRef<number | null>(null); // timestamp of the last announced penalty
+  const myIdRef            = useRef<string | null>(null); // myId for the socket handler, which outlives renders
+
+  myIdRef.current = myId;
 
   // ── derived
   const activePlayerId = gs ? gs.player_order[gs.current_player_index] : null;
@@ -298,6 +303,16 @@ export default function App() {
           setDiscardClickMode(false);
         }
         if (!newGs?.jump_in_window_open) setJumpMode(null);
+
+        // Announce new penalties to everyone (skipped on the first state after joining)
+        const log = newGs?.mistake_log ?? [];
+        const latest = log[log.length - 1];
+        const seen = mistakeCountRef.current;
+        if (seen !== null && latest && latest.timestamp > seen) {
+          const who = latest.player_id === myIdRef.current ? 'You' : newGs!.players[latest.player_id]?.name ?? 'Someone';
+          showToast(`Penalty — ${who}: ${latest.reason} (+1 card)`, 'error');
+        }
+        mistakeCountRef.current = latest?.timestamp ?? 0;
         break;
       }
 
