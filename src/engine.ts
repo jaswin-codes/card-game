@@ -261,7 +261,8 @@ export function createInitialState(playerIds: string[], dealerId?: string, rando
     active_power: null,
     turn_timer_start: null,
     winner_ids: [],
-    mistake_log: []
+    mistake_log: [],
+    recent_tops: []
   };
 }
 
@@ -271,7 +272,7 @@ export function transition(state: GameState, action: Action, timestamp: number, 
     return { state, success: false, error: 'Invalid action' };
   }
 
-  const result = logMistakes(state, action, runAction(state, action, timestamp, randomFn), timestamp);
+  const result = trackRecentTops(state, logMistakes(state, action, runAction(state, action, timestamp, randomFn), timestamp));
 
   // Immutability contract: a returned state must never share its players map
   // object with the input state, so callers can safely persist/compare either.
@@ -282,6 +283,14 @@ export function transition(state: GameState, action: Action, timestamp: number, 
 }
 
 const MISTAKE_LOG_SIZE = 20;
+const RACE_WINDOW = 5; // top discards that may change between seeing a card and the jump arriving
+
+function trackRecentTops(before: GameState, result: ActionResponse): ActionResponse {
+  const prevTop = before.last_discard_card;
+  if (!prevTop || result.state.last_discard_card?.id === prevTop.id) return result;
+  const recent = [...(result.state.recent_tops ?? []), { id: prevTop.id, value: prevTop.value }].slice(-RACE_WINDOW);
+  return { ...result, state: { ...result.state, recent_tops: recent } };
+}
 
 function logMistakes(before: GameState, action: Action, result: ActionResponse, timestamp: number): ActionResponse {
   if (result.state === before) return result;
@@ -832,7 +841,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
         };
 
         return { state: nextGameState, success: true };
-      } else if (lostJumpInRace(state, action.expected_discard_id)) {
+      } else if (lostJumpInRace(state, action.expected_discard_id, card.value)) {
         return { state, success: false, error: 'Too late — someone else jumped in first' };
       } else {
         // Wrong jump-in number mistake
@@ -877,7 +886,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
       // Check if jumper has seen the opponent's card (prior knowledge)
       const hasPriorKnowledge = oppCard.known_by.includes(action.player_id);
       const matches = oppCard.value === state.last_discard_card.value;
-      if (!(hasPriorKnowledge && matches) && lostJumpInRace(state, action.expected_discard_id)) {
+      if (!(hasPriorKnowledge && matches) && targetJumpedByOther(state, action.expected_opponent_card_id, oppCard.id)) {
         return { state, success: false, error: 'Too late — someone else jumped in first' };
       }
       if (!hasPriorKnowledge) {
@@ -1054,10 +1063,20 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
   }
 }
 
-// A jump-in aimed at a discard that has since been covered lost a race; it is
-// not a mistake, because the player matched the card they saw.
-function lostJumpInRace(state: GameState, expectedDiscardId: string | undefined): boolean {
-  return !!expectedDiscardId && state.last_discard_card?.id !== expectedDiscardId;
+// Clients are untrusted, so a "too late" excuse is only granted when the server
+// can confirm it from its own record of recent top discards.
+
+// Type 1: the discard the player saw was the top card moments ago and their
+// card matched it, so they lost a race rather than made a mistake
+function lostJumpInRace(state: GameState, expectedDiscardId: string | undefined, cardValue: Card['value']): boolean {
+  return !!expectedDiscardId && (state.recent_tops ?? []).some(t => t.id === expectedDiscardId && t.value === cardValue);
+}
+
+// Type 2: the exact opponent card the player targeted was itself just jumped by
+// someone else (it is now the top discard, or was moments ago)
+function targetJumpedByOther(state: GameState, expectedCardId: string | undefined, cardNowInSlot: string): boolean {
+  if (!expectedCardId || expectedCardId === cardNowInSlot) return false;
+  return state.last_discard_card?.id === expectedCardId || (state.recent_tops ?? []).some(t => t.id === expectedCardId);
 }
 
 // Complete the active turn and advance logic

@@ -35,7 +35,9 @@ function nextAction(s: GameState, r: () => number, move: number): Action {
   if (roll < 0.08) {
     const pid = pick(r, live(s))!;
     const pos = pick(r, positionsOf(s, pid));
-    if (pos) return { type: 'JUMP_IN_TYPE_1', player_id: pid, card_position: pos, expected_discard_id: s.last_discard_card?.id, timestamp: ts };
+    // Honest, stale and invented race claims, as a modified client might send
+    const expected = pick(r, [s.last_discard_card?.id, s.recent_tops[0]?.id, s.discard_pile[0]?.id, 'fake-id', undefined]);
+    if (pos) return { type: 'JUMP_IN_TYPE_1', player_id: pid, card_position: pos, expected_discard_id: expected, timestamp: ts };
   }
   if (roll < 0.11) {
     const pid = pick(r, live(s))!;
@@ -43,7 +45,9 @@ function nextAction(s: GameState, r: () => number, move: number): Action {
     const oppPos = opp && pick(r, positionsOf(s, opp));
     const ownPos = pick(r, positionsOf(s, pid));
     if (opp && oppPos && ownPos) {
-      return { type: 'JUMP_IN_TYPE_2', player_id: pid, opponent_player_id: opp, opponent_position: oppPos, own_position: ownPos, timestamp: ts };
+      const target = s.players[opp].cards.find(c => c.position === oppPos)!;
+      const expected = pick(r, [target.id, s.last_discard_card?.id, 'fake-id', undefined]);
+      return { type: 'JUMP_IN_TYPE_2', player_id: pid, opponent_player_id: opp, opponent_position: oppPos, own_position: ownPos, expected_opponent_card_id: expected, timestamp: ts };
     }
   }
   if (roll < 0.13 && others.length) return { type: 'DRAW_PILE_DRAW', player_id: pick(r, others)!, timestamp: ts };

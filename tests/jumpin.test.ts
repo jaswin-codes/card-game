@@ -15,8 +15,8 @@ function setTop(state: GameState, value: CardRank, suit: CardSuit = 'Hearts') {
 const jump1 = (state: GameState, pid: string, pos: CardPosition, expected?: string) =>
   transition(state, { type: 'JUMP_IN_TYPE_1', player_id: pid, card_position: pos, expected_discard_id: expected, timestamp: 5 }, 5);
 
-const jump2 = (state: GameState, pid: string, opp: string, oppPos: CardPosition, ownPos: CardPosition, expected?: string) =>
-  transition(state, { type: 'JUMP_IN_TYPE_2', player_id: pid, opponent_player_id: opp, opponent_position: oppPos, own_position: ownPos, expected_discard_id: expected, timestamp: 5 }, 5);
+const jump2 = (state: GameState, pid: string, opp: string, oppPos: CardPosition, ownPos: CardPosition, expectedCard?: string) =>
+  transition(state, { type: 'JUMP_IN_TYPE_2', player_id: pid, opponent_player_id: opp, opponent_position: oppPos, own_position: ownPos, expected_opponent_card_id: expectedCard, timestamp: 5 }, 5);
 
 describe('Jump-In Type 1', () => {
   it('a matching card leaves the grid and becomes the top discard, out of turn', () => {
@@ -105,7 +105,7 @@ describe('Jump-In Type 2', () => {
     const state = createInitialState(['P1', 'P2']);
     setTop(state, '8');
     setCard(state, 'P2', 'top-left', '8');
-    const res = jump2(state, 'P1', 'P2', 'top-left', 'top-left', 'top-8');
+    const res = jump2(state, 'P1', 'P2', 'top-left', 'top-left', 'P2-top-left');
     expect(res.success).toBe(false);
     expect(res.state.players['P1'].mistake_count).toBe(1);
   });
@@ -115,7 +115,7 @@ describe('Jump-In Type 2', () => {
     setTop(state, '8');
     setCard(state, 'P2', 'top-left', '8', ['P1']);
     setCard(state, 'P1', 'bottom-right', 'J', ['P1']);
-    const res = jump2(state, 'P1', 'P2', 'top-left', 'bottom-right', 'top-8');
+    const res = jump2(state, 'P1', 'P2', 'top-left', 'bottom-right', 'P2-top-left');
     expect(res.success).toBe(true);
     expect(res.state.players['P1'].cards.length).toBe(3);
     const given = res.state.players['P2'].cards.find(c => c.position === 'top-left')!;
@@ -127,7 +127,7 @@ describe('Jump-In Type 2', () => {
     const state = createInitialState(['P1', 'P2']);
     setTop(state, '8');
     setCard(state, 'P2', 'top-left', '3', ['P1']);
-    const res = jump2(state, 'P1', 'P2', 'top-left', 'top-left', 'top-8');
+    const res = jump2(state, 'P1', 'P2', 'top-left', 'top-left', 'P2-top-left');
     expect(res.success).toBe(false);
     expect(res.state.players['P1'].mistake_count).toBe(1);
   });
@@ -136,10 +136,10 @@ describe('Jump-In Type 2', () => {
     const state = createInitialState(['P1', 'P2', 'P3']);
     setTop(state, '8');
     setCard(state, 'P2', 'top-left', '8', ['P1', 'P3']);
-    const first = jump2(state, 'P1', 'P2', 'top-left', 'top-left', 'top-8');
+    const first = jump2(state, 'P1', 'P2', 'top-left', 'top-left', 'P2-top-left');
     expect(first.success).toBe(true);
     // P3 targets the same slot, which now holds P1's card (P3 has no knowledge of it)
-    const second = jump2(first.state, 'P3', 'P2', 'top-left', 'top-left', 'top-8');
+    const second = jump2(first.state, 'P3', 'P2', 'top-left', 'top-left', 'P2-top-left');
     expect(second.success).toBe(false);
     expect(second.state.players['P3'].mistake_count).toBe(0);
   });
@@ -149,8 +149,65 @@ describe('Jump-In Type 2', () => {
     setTop(state, '8');
     setCard(state, 'P1', 'top-left', '8', ['P2']);
     state = transition(state, { type: 'CALL', player_id: 'P1', timestamp: 2 }, 2).state;
-    const res = jump2(state, 'P2', 'P1', 'top-left', 'top-left', 'top-8');
+    const res = jump2(state, 'P2', 'P1', 'top-left', 'top-left', 'P1-top-left');
     expect(res.success).toBe(false);
     expect(res.state.players['P2'].mistake_count).toBe(0);
+  });
+});
+
+// A modified client could claim it "lost a race" to make blind jump-ins free;
+// the server only accepts the excuse when its own record backs it up
+describe('Jump-in race excuses cannot be faked', () => {
+  it('Type 1 with an invented discard id is still a mistake', () => {
+    const state = createInitialState(['P1', 'P2']);
+    setTop(state, '7');
+    setCard(state, 'P2', 'top-left', '5');
+    const res = jump1(state, 'P2', 'top-left', 'no-such-card');
+    expect(res.success).toBe(false);
+    expect(res.state.players['P2'].mistake_count).toBe(1);
+  });
+
+  it('Type 1 citing a real recent top that did not match the card is still a mistake', () => {
+    const state = createInitialState(['P1', 'P2']);
+    setTop(state, '7');
+    setCard(state, 'P1', 'bottom-left', '9');
+    setCard(state, 'P2', 'top-left', '5');
+    const taken = transition(state, { type: 'TAKE_DISCARD_SWAP', player_id: 'P1', target_position: 'bottom-left', timestamp: 4 }, 4);
+    const res = jump1(taken.state, 'P2', 'top-left', 'top-7'); // the 7 was real, but P2's card is a 5
+    expect(res.success).toBe(false);
+    expect(res.state.players['P2'].mistake_count).toBe(1);
+  });
+
+  it('Type 1 citing an old top from long ago is still a mistake', () => {
+    let state = createInitialState(['P1', 'P2']);
+    setTop(state, '5');
+    setCard(state, 'P2', 'top-left', '5');
+    // Six more cards go on the pile, pushing the 5 out of the race window
+    for (let i = 0; i < 6; i++) {
+      const top = { id: `filler-${i}`, value: '2' as const, suit: 'Clubs' as const, position: 'top-left' as CardPosition, face_up: true, known_by: [] };
+      state = transition({ ...state, draw_pile: [top, ...state.draw_pile] }, { type: 'DRAW_PILE_DRAW', player_id: state.player_order[state.current_player_index], timestamp: i }, i).state;
+      state = transition(state, { type: 'DRAW_PILE_DISCARD', player_id: state.player_order[state.current_player_index], timestamp: i }, i).state;
+    }
+    const res = jump1(state, 'P2', 'top-left', 'top-5');
+    expect(res.success).toBe(false);
+    expect(res.state.players['P2'].mistake_count).toBe(1);
+  });
+
+  it('Type 2 citing a card that is still in the slot is still a mistake', () => {
+    const state = createInitialState(['P1', 'P2']);
+    setTop(state, '8');
+    setCard(state, 'P2', 'top-left', '3'); // no knowledge, wrong rank
+    const res = jump2(state, 'P1', 'P2', 'top-left', 'top-left', 'P2-top-left');
+    expect(res.success).toBe(false);
+    expect(res.state.players['P1'].mistake_count).toBe(1);
+  });
+
+  it('Type 2 citing an invented card id is still a mistake', () => {
+    const state = createInitialState(['P1', 'P2']);
+    setTop(state, '8');
+    setCard(state, 'P2', 'top-left', '3');
+    const res = jump2(state, 'P1', 'P2', 'top-left', 'top-left', 'made-up');
+    expect(res.success).toBe(false);
+    expect(res.state.players['P1'].mistake_count).toBe(1);
   });
 });

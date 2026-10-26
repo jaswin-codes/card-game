@@ -589,7 +589,8 @@ export default function App() {
         opponent_player_id: selectedOpp.pid,
         opponent_position: selectedOpp.pos,
         own_position: card.position,
-        expected_discard_id: gs.last_discard_card?.id,
+        // Real id of the card you know is there, so a lost race isn't penalised
+        expected_opponent_card_id: gs.players[selectedOpp.pid]?.cards.find(c => c.position === selectedOpp.pos)?.id,
       });
       setSelectedOpp(null);
       setJumpMode(null);
