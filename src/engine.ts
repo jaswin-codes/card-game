@@ -115,7 +115,7 @@ export function calculatePlayerScore(player: Player): number {
 // Apply a mistake penalty to a player.
 // Returns state unchanged (and logs a warning) if the player ID is not found,
 // so callers always receive a valid GameState regardless of lookup failures.
-export function applyMistake(state: GameState, playerId: string, timestamp: number): GameState {
+export function applyMistake(state: GameState, playerId: string, timestamp: number, randomFn = Math.random): GameState {
   const rawPlayer = state.players[playerId];
   if (!rawPlayer) {
     // Defensive: player may have already been eliminated / removed. Do not crash.
@@ -129,7 +129,7 @@ export function applyMistake(state: GameState, playerId: string, timestamp: numb
   player.mistake_count += 1;
 
   // Reshuffle if empty
-  newState = checkAndReshuffleDrawPile(newState);
+  newState = checkAndReshuffleDrawPile(newState, randomFn);
 
   if (newState.draw_pile.length === 0) {
     // If no cards left to draw, cannot draw penalty card but still count mistake
@@ -335,7 +335,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
       const activePlayerId = state.player_order[state.current_player_index];
       if (action.player_id !== activePlayerId) {
         // Skipping turn/playing out of order mistake
-        const nextState = applyMistake(state, action.player_id, timestamp);
+        const nextState = applyMistake(state, action.player_id, timestamp, randomFn);
         return { state: nextState, success: false, error: 'Skipped turn / out of order action' };
       }
 
@@ -368,7 +368,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
     case 'DRAW_PILE_KEEP': {
       const activePlayerId = state.player_order[state.current_player_index];
       if (action.player_id !== activePlayerId) {
-        const nextState = applyMistake(state, action.player_id, timestamp);
+        const nextState = applyMistake(state, action.player_id, timestamp, randomFn);
         return { state: nextState, success: false, error: 'Out of order action' };
       }
 
@@ -416,7 +416,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
     case 'DRAW_PILE_DISCARD': {
       const activePlayerId = state.player_order[state.current_player_index];
       if (action.player_id !== activePlayerId) {
-        const nextState = applyMistake(state, action.player_id, timestamp);
+        const nextState = applyMistake(state, action.player_id, timestamp, randomFn);
         return { state: nextState, success: false, error: 'Out of order action' };
       }
 
@@ -461,7 +461,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
     case 'TAKE_DISCARD_SWAP': {
       const activePlayerId = state.player_order[state.current_player_index];
       if (action.player_id !== activePlayerId) {
-        const nextState = applyMistake(state, action.player_id, timestamp);
+        const nextState = applyMistake(state, action.player_id, timestamp, randomFn);
         return { state: nextState, success: false, error: 'Out of order action' };
       }
 
@@ -514,7 +514,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
 
     case 'RESOLVE_POWER_7_8': {
       if (!state.active_power || state.active_power.power_type !== '7_8' || state.active_power.player_id !== action.player_id) {
-        const nextState = applyMistake(state, action.player_id, timestamp);
+        const nextState = applyMistake(state, action.player_id, timestamp, randomFn);
         return { state: nextState, success: false, error: 'Wrong power usage' };
       }
 
@@ -547,7 +547,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
 
     case 'RESOLVE_POWER_9_10': {
       if (!state.active_power || state.active_power.power_type !== '9_10' || state.active_power.player_id !== action.player_id) {
-        const nextState = applyMistake(state, action.player_id, timestamp);
+        const nextState = applyMistake(state, action.player_id, timestamp, randomFn);
         return { state: nextState, success: false, error: 'Wrong power usage' };
       }
 
@@ -598,7 +598,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
 
     case 'RESOLVE_POWER_J_Q': {
       if (!state.active_power || state.active_power.power_type !== 'J_Q' || state.active_power.player_id !== action.player_id) {
-        const nextState = applyMistake(state, action.player_id, timestamp);
+        const nextState = applyMistake(state, action.player_id, timestamp, randomFn);
         return { state: nextState, success: false, error: 'Wrong power usage' };
       }
 
@@ -670,7 +670,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
     case 'RESOLVE_POWER_K_LOOK':
     case 'RESOLVE_POWER_K': {
       if (!state.active_power || state.active_power.power_type !== 'K' || state.active_power.player_id !== action.player_id) {
-        const nextState = applyMistake(state, action.player_id, timestamp);
+        const nextState = applyMistake(state, action.player_id, timestamp, randomFn);
         return { state: nextState, success: false, error: 'Wrong power usage' };
       }
 
@@ -836,7 +836,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
         return { state, success: false, error: 'Too late — someone else jumped in first' };
       } else {
         // Wrong jump-in number mistake
-        const nextState = applyMistake(state, action.player_id, timestamp);
+        const nextState = applyMistake(state, action.player_id, timestamp, randomFn);
         return { state: nextState, success: false, error: 'Wrong jump-in number' };
       }
     }
@@ -882,7 +882,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
       }
       if (!hasPriorKnowledge) {
         // Mistake: illegal peeking / wrong jump-in / knowledge requirement not met
-        const nextState = applyMistake(state, action.player_id, timestamp);
+        const nextState = applyMistake(state, action.player_id, timestamp, randomFn);
         return { state: nextState, success: false, error: 'No prior knowledge of opponent card' };
       }
 
@@ -928,7 +928,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
         return { state: nextGameState, success: true };
       } else {
         // Wrong matching number
-        const nextState = applyMistake(state, action.player_id, timestamp);
+        const nextState = applyMistake(state, action.player_id, timestamp, randomFn);
         return { state: nextState, success: false, error: 'Wrong jump-in card rank' };
       }
     }
@@ -936,7 +936,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
     case 'CALL': {
       const activePlayerId = state.player_order[state.current_player_index];
       if (action.player_id !== activePlayerId) {
-        const nextState = applyMistake(state, action.player_id, timestamp);
+        const nextState = applyMistake(state, action.player_id, timestamp, randomFn);
         return { state: nextState, success: false, error: 'Cannot call out of order' };
       }
 
@@ -999,7 +999,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
     }
 
     case 'FORCE_MISTAKE': {
-      const nextState = applyMistake(state, action.player_id, timestamp);
+      const nextState = applyMistake(state, action.player_id, timestamp, randomFn);
       return { state: nextState, success: true };
     }
 
@@ -1034,7 +1034,7 @@ function runAction(state: GameState, action: Action, timestamp: number, randomFn
         }
 
         if (state.players[activePlayerId]?.connection_status !== 'eliminated') {
-          nextGameState = applyMistake(nextGameState, activePlayerId, timestamp);
+          nextGameState = applyMistake(nextGameState, activePlayerId, timestamp, randomFn);
         }
         if (nextGameState.status === 'ended') {
           return { state: nextGameState, success: true };
@@ -1130,6 +1130,8 @@ export function endRound(state: GameState): GameState {
     ...state,
     players,
     status: 'ended',
+    // A card still being decided on goes to the discard pile rather than vanishing
+    discard_pile: state.drawn_card ? [...state.discard_pile, { ...state.drawn_card, face_up: true }] : state.discard_pile,
     drawn_card: null,
     active_power: null,
     winner_ids: callerWins ? [state.caller_id!] : candidates
