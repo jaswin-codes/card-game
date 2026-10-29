@@ -16,6 +16,7 @@ import {
   transition,
   calculatePlayerScore
 } from './engine.js';
+import { maskGameState } from './mask.js';
 
 interface Session {
   playerId: string;
@@ -24,6 +25,8 @@ interface Session {
   roomId: string;
   isSpectator: boolean;
   ws: WebSocket | null;
+  chatTimes: number[]; // send times inside the current rate-limit window
+  lastAction: { type: string; ok: boolean; error?: string } | null; // checked by "Call Mistake"
 }
 
 interface Room {
@@ -34,6 +37,7 @@ interface Room {
   turnTimer: NodeJS.Timeout | null;
   powerTimer: NodeJS.Timeout | null;
   reconnectTimers: Record<string, NodeJS.Timeout>;
+  cleanupTimer: NodeJS.Timeout | null;
 }
 
 // Actions a client may send; setup, timer and connection actions are server-only
@@ -46,16 +50,53 @@ const CLIENT_ACTION_TYPES = new Set<string>([
   'RESOLVE_POWER_7_8',
   'RESOLVE_POWER_9_10',
   'RESOLVE_POWER_J_Q',
+  'RESOLVE_POWER_K_LOOK',
   'RESOLVE_POWER_K',
+  'SKIP_POWER',
   'JUMP_IN_TYPE_1',
   'JUMP_IN_TYPE_2',
   'CALL'
 ]);
 
-const rooms: Record<string, Room> = {};
-const sessions: Record<string, Session> = {}; // token -> Session
+const CHAT_MAX_LENGTH = 200;
+const CHAT_WINDOW_MS = 10000;
+const CHAT_MAX_PER_WINDOW = 5;
+const REACTIONS = new Set(['👍', '😂', '😮', '😡', '🔥', '👏', '🤔', '😭']);
+
+const ACTION_LABELS: Record<string, string> = {
+  DRAW_PILE_DRAW: 'draw from the pile',
+  DRAW_PILE_KEEP: 'keep the drawn card',
+  DRAW_PILE_DISCARD: 'discard the drawn card',
+  TAKE_DISCARD_SWAP: 'take the discard',
+  RESOLVE_POWER_7_8: 'look at own card',
+  RESOLVE_POWER_9_10: "look at an opponent's card",
+  RESOLVE_POWER_J_Q: 'blind swap',
+  RESOLVE_POWER_K_LOOK: 'King look',
+  RESOLVE_POWER_K: 'King swap decision',
+  SKIP_POWER: 'skip power',
+  JUMP_IN_TYPE_1: 'jump in with own card',
+  JUMP_IN_TYPE_2: "jump in with an opponent's card",
+  CALL: 'call'
+};
+
+// Prototype-free maps, so ids like "__proto__" from clients can't hit Object.prototype
+const rooms: Record<string, Room> = Object.create(null);
+const sessions: Record<string, Session> = Object.create(null); // token -> Session
+
+const NAME_MAX_LENGTH = 20;
+const MAX_MESSAGE_BYTES = 16 * 1024;
+
+function cleanName(name: unknown, fallback: string): string {
+  const trimmed = typeof name === 'string' ? name.trim().slice(0, NAME_MAX_LENGTH) : '';
+  return trimmed || fallback;
+}
 
 const PORT = Number(process.env.PORT) || 8080;
+// Overridable so tests don't wait 30 s per timeout; production uses the rule defaults
+const TURN_MS = Number(process.env.TURN_TIMER_MS) || 30000; // turn and power timers
+const RECONNECT_MS = Number(process.env.RECONNECT_MS) || 300000;
+// How long an empty lobby or finished game survives, so a page refresh doesn't lose the room
+const EMPTY_ROOM_GRACE_MS = Number(process.env.EMPTY_ROOM_GRACE_MS) || 30000;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIST = path.resolve(__dirname, '../../client/dist');
@@ -109,58 +150,7 @@ const server = createServer((req, res) => {
     res.writeHead(500).end('Internal server error');
   }
 });
-const wss = new WebSocketServer({ noServer: true });
-
-// Helper to mask state for a specific client session
-function maskGameState(state: GameState | null, viewerSession: Session): any {
-  if (!state) return null;
-
-  const maskedPlayers: Record<string, any> = {};
-
-  for (const [id, p] of Object.entries(state.players)) {
-    const maskedCards = p.cards.map(c => {
-      // Spectators see no face-down cards
-      if (viewerSession.isSpectator || viewerSession.playerId === 'spectator') {
-        return {
-          ...c,
-          value: c.face_up ? c.value : null,
-          suit: c.face_up ? c.suit : null,
-          known_by: [] // Hide who knows what
-        };
-      }
-
-      // Active player views cards:
-      // Can see card value/suit if it is face-up OR known by the viewer
-      const canSee = c.face_up || c.known_by.includes(viewerSession.playerId);
-      return {
-        ...c,
-        value: canSee ? c.value : null,
-        suit: canSee ? c.suit : null,
-        known_by: c.known_by.includes(viewerSession.playerId) ? [viewerSession.playerId] : []
-      };
-    });
-
-    maskedPlayers[id] = {
-      ...p,
-      cards: maskedCards,
-      score: p.connection_status === 'eliminated' ? 0 : calculatePlayerScore(p)
-    };
-  }
-
-  // Hide the draw pile details except length
-  const drawPileLength = state.draw_pile.length;
-
-  return {
-    ...state,
-    players: maskedPlayers,
-    draw_pile: { length: drawPileLength } as any,
-    drawn_card: state.drawn_card
-      ? viewerSession.playerId === state.player_order[state.current_player_index]
-        ? state.drawn_card
-        : { id: state.drawn_card.id, value: null, suit: null, position: state.drawn_card.position, face_up: false, known_by: [] }
-      : null
-  };
-}
+const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
 
 // Broadcast game state to all clients in a room
 function broadcastRoomState(room: Room) {
@@ -168,7 +158,7 @@ function broadcastRoomState(room: Room) {
 
   for (const client of allClients) {
     if (client.ws && client.ws.readyState === WebSocket.OPEN) {
-      const masked = maskGameState(room.gameState, client);
+      const masked = maskGameState(room.gameState, client.playerId, client.isSpectator);
       client.ws.send(
         JSON.stringify({
           type: 'GAME_STATE_UPDATE',
@@ -180,6 +170,22 @@ function broadcastRoomState(room: Room) {
         })
       );
     }
+  }
+}
+
+// Relay a chat line, reaction or server notice to everyone in the room
+function broadcastChat(room: Room, from: Session | null, kind: 'chat' | 'emoji' | 'system', text: string) {
+  const payload = JSON.stringify({
+    type: 'CHAT',
+    kind,
+    from: from?.playerId ?? null,
+    name: from?.name ?? 'Server',
+    spectator: !!from?.isSpectator,
+    text,
+    ts: Date.now()
+  });
+  for (const client of [...room.players, ...room.spectators]) {
+    if (client.ws && client.ws.readyState === WebSocket.OPEN) client.ws.send(payload);
   }
 }
 
@@ -204,7 +210,7 @@ function startTurnTimer(room: Room) {
     } catch (err) {
       console.error(`[Timer] Unhandled error in turn timer for room ${room.id}:`, err);
     }
-  }, 30000); // 30 seconds
+  }, TURN_MS);
 }
 
 function startPowerTimer(room: Room) {
@@ -227,7 +233,7 @@ function startPowerTimer(room: Room) {
     } catch (err) {
       console.error(`[Timer] Unhandled error in power timer for room ${room.id}:`, err);
     }
-  }, 30000); // 30 seconds
+  }, TURN_MS);
 }
 
 // Handle client messages
@@ -252,6 +258,10 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
     ws.send(JSON.stringify({ type: 'ERROR', error: 'Invalid JSON format' }));
     return;
   }
+  if (!message || typeof message !== 'object' || typeof message.type !== 'string') {
+    ws.send(JSON.stringify({ type: 'ERROR', error: 'Invalid message' }));
+    return;
+  }
 
   const timestamp = Date.now();
 
@@ -263,11 +273,13 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
 
       const session: Session = {
         playerId,
-        name: message.playerName || 'Player 1',
+        name: cleanName(message.playerName, 'Player 1'),
         token,
         roomId,
         isSpectator: false,
-        ws
+        ws,
+        chatTimes: [],
+        lastAction: null
       };
 
       sessions[token] = session;
@@ -280,7 +292,8 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
         spectators: [],
         turnTimer: null,
         powerTimer: null,
-        reconnectTimers: {}
+        reconnectTimers: {},
+        cleanupTimer: null
       };
 
       ws.send(
@@ -296,7 +309,8 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
     }
 
     case 'JOIN_ROOM': {
-      const { roomId, playerName, isSpectator } = message;
+      const { playerName, isSpectator } = message;
+      const roomId = typeof message.roomId === 'string' ? message.roomId.trim().toUpperCase() : '';
       const room = rooms[roomId];
       if (!room) {
         ws.send(JSON.stringify({ type: 'ERROR', error: 'Room not found' }));
@@ -309,11 +323,13 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
 
       const session: Session = {
         playerId,
-        name: playerName || `Player ${room.players.length + 1}`,
+        name: cleanName(playerName, `Player ${room.players.length + 1}`),
         token,
         roomId,
         isSpectator: joinAsSpectator,
-        ws
+        ws,
+        chatTimes: [],
+        lastAction: null
       };
 
       sessions[token] = session;
@@ -404,6 +420,7 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
       if (!result.success) {
         ws.send(JSON.stringify({ type: 'ACTION_FAILED', error: result.error }));
       }
+      session.lastAction = { type: action.type, ok: result.success, error: result.error };
 
       // Timers only restart when the turn or phase actually moves on, so
       // out-of-turn jump-ins don't reset the active player's clock.
@@ -426,6 +443,69 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
       break;
     }
 
+    case 'CHAT':
+    case 'REACTION': {
+      const session = clientSession.session;
+      const room = session && rooms[session.roomId];
+      if (!session || !room) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'Join a room first' }));
+        return;
+      }
+
+      const text = message.type === 'CHAT' && typeof message.text === 'string' ? message.text.trim() : message.emoji;
+      if (message.type === 'CHAT' && (!text || text.length > CHAT_MAX_LENGTH)) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: `Messages must be 1–${CHAT_MAX_LENGTH} characters` }));
+        return;
+      }
+      if (message.type === 'REACTION' && !REACTIONS.has(text)) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'Unknown reaction' }));
+        return;
+      }
+
+      session.chatTimes = session.chatTimes.filter(t => timestamp - t < CHAT_WINDOW_MS);
+      if (session.chatTimes.length >= CHAT_MAX_PER_WINDOW) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'Slow down — too many messages' }));
+        return;
+      }
+      session.chatTimes.push(timestamp);
+
+      broadcastChat(room, session, message.type === 'CHAT' ? 'chat' : 'emoji', text);
+      break;
+    }
+
+    case 'REPORT_MISTAKE': {
+      // Every detectable violation is already penalised automatically, so a
+      // manual call checks the accused player's last action against the
+      // server's record and announces the verdict. No one is penalised by it.
+      const session = clientSession.session;
+      const room = session && rooms[session.roomId];
+      if (!session || !room || !room.gameState || session.isSpectator) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'Only players in a game can call a mistake' }));
+        return;
+      }
+      const accused = room.players.find(p => p.playerId === message.accused_id);
+      if (!accused || accused === session) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'Pick another player' }));
+        return;
+      }
+      session.chatTimes = session.chatTimes.filter(t => timestamp - t < CHAT_WINDOW_MS);
+      if (session.chatTimes.length >= CHAT_MAX_PER_WINDOW) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'Slow down — too many messages' }));
+        return;
+      }
+      session.chatTimes.push(timestamp);
+
+      const last = accused.lastAction;
+      const label = last ? ACTION_LABELS[last.type] ?? last.type : '';
+      const verdict = !last
+        ? `${accused.name} hasn't made a move yet.`
+        : last.ok
+          ? `${accused.name}'s last move (${label}) was legal.`
+          : `${accused.name}'s last move (${label}) was already rejected: ${last.error}.`;
+      broadcastChat(room, null, 'system', `${session.name} called a mistake on ${accused.name}. Server check: ${verdict}`);
+      break;
+    }
+
     case 'RECONNECT': {
       const { roomId, playerId, token } = message;
       const room = rooms[roomId];
@@ -434,6 +514,14 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
       if (!room || !session || session.playerId !== playerId) {
         ws.send(JSON.stringify({ type: 'RECONNECT_FAILED', error: 'Session expired — please join again' }));
         return;
+      }
+
+      if (room.cleanupTimer) {
+        clearTimeout(room.cleanupTimer);
+        room.cleanupTimer = null;
+      }
+      if (session.isSpectator && !room.spectators.includes(session)) {
+        room.spectators.push(session);
       }
 
       // A lobby player who dropped (e.g. page refresh) gets their seat back
@@ -480,9 +568,10 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
 }
 
 // Handle client disconnections
-function handleDisconnect(clientSession: { session: Session | null }) {
+function handleDisconnect(clientSession: { session: Session | null }, ws: WebSocket) {
   const session = clientSession.session;
-  if (!session) return;
+  // Ignore sockets the session has already moved off (reconnected elsewhere, or close after error)
+  if (!session || session.ws !== ws) return;
 
   const room = rooms[session.roomId];
   if (!room) return;
@@ -491,6 +580,7 @@ function handleDisconnect(clientSession: { session: Session | null }) {
 
   if (session.isSpectator) {
     room.spectators = room.spectators.filter(s => s.playerId !== session.playerId);
+    cleanupIfEmpty(room);
     return;
   }
 
@@ -576,12 +666,37 @@ function handleDisconnect(clientSession: { session: Session | null }) {
         console.error(`[Reconnect] Error eliminating player ${session.playerId}:`, err);
         delete room.reconnectTimers[session.playerId];
       }
-    }, 300000); // 5 minutes
+    }, RECONNECT_MS);
   } else {
     // If game has not started yet, simply remove player from lobby
     room.players = room.players.filter(p => p.playerId !== session.playerId);
     broadcastRoomState(room);
   }
+  cleanupIfEmpty(room);
+}
+
+// Drop a room nobody is connected to after a grace period: short in the lobby
+// or after a game, a little past the reconnect window mid-game
+function cleanupIfEmpty(room: Room) {
+  if (room.cleanupTimer || [...room.players, ...room.spectators].some(s => s.ws)) return;
+  const inProgress = room.gameState && room.gameState.status !== 'ended';
+  room.cleanupTimer = setTimeout(() => {
+    room.cleanupTimer = null;
+    if (![...room.players, ...room.spectators].some(s => s.ws)) deleteRoom(room);
+  }, inProgress ? RECONNECT_MS + 60 * 1000 : EMPTY_ROOM_GRACE_MS);
+}
+
+function deleteRoom(room: Room) {
+  if (room.turnTimer) clearTimeout(room.turnTimer);
+  if (room.powerTimer) clearTimeout(room.powerTimer);
+  if (room.cleanupTimer) clearTimeout(room.cleanupTimer);
+  Object.values(room.reconnectTimers).forEach(clearTimeout);
+  // Includes lobby players who left, whose sessions are no longer in room.players
+  for (const [token, s] of Object.entries(sessions)) {
+    if (s.roomId === room.id) delete sessions[token];
+  }
+  delete rooms[room.id];
+  console.log(`[Room] ${room.id} closed (empty)`);
 }
 
 // Websocket setup
@@ -599,12 +714,12 @@ wss.on('connection', ws => {
   });
 
   ws.on('close', () => {
-    handleDisconnect(clientSession);
+    handleDisconnect(clientSession, ws);
   });
 
   ws.on('error', err => {
     console.error(`Socket error:`, err);
-    handleDisconnect(clientSession);
+    handleDisconnect(clientSession, ws);
   });
 });
 

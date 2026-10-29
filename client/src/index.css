@@ -28,7 +28,15 @@
   --card-radius:    11px;
 
   --transition:     all 0.2s cubic-bezier(0.4,0,0.2,1);
+
+  --glow-1:         rgba(99,102,241,.16);
+  --glow-2:         rgba(236,72,153,.10);
 }
+
+/* ---------- Background themes (picked in the UI, saved per browser) ---------- */
+:root[data-theme="felt"]    { --bg: #04140c; --bg-2: #082016; --glass: rgba(10, 36, 24, 0.72); --glow-1: rgba(34,197,94,.20); --glow-2: rgba(245,158,11,.08); }
+:root[data-theme="crimson"] { --bg: #12070a; --bg-2: #1f0c12; --glass: rgba(38, 14, 20, 0.72); --glow-1: rgba(239,68,68,.18); --glow-2: rgba(245,158,11,.10); }
+:root[data-theme="ocean"]   { --bg: #03101a; --bg-2: #071a2a; --glass: rgba(10, 28, 44, 0.72); --glow-1: rgba(14,165,233,.20); --glow-2: rgba(34,211,238,.10); }
 
 /* ---------- Reset / Base ---------- */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -44,8 +52,8 @@ html, body, #root {
 
 body {
   background-image:
-    radial-gradient(ellipse 60% 50% at 10% 15%,  rgba(99,102,241,.16) 0%, transparent 55%),
-    radial-gradient(ellipse 50% 40% at 90% 85%, rgba(236,72,153,.10) 0%, transparent 50%);
+    radial-gradient(ellipse 60% 50% at 10% 15%,  var(--glow-1) 0%, transparent 55%),
+    radial-gradient(ellipse 50% 40% at 90% 85%, var(--glow-2) 0%, transparent 50%);
   min-height: 100vh;
 }
 
@@ -831,3 +839,64 @@ body {
 .p-4  { padding: 16px; }
 .p-6  { padding: 24px; }
 .p-8  { padding: 32px; }
+
+/* Chat */
+.chat-panel { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.chat-reactions { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; }
+.chat-reaction { background: transparent; border: 1px solid rgba(255,255,255,.08); border-radius: 8px; font-size: 1.05rem; padding: 2px 6px; cursor: pointer; }
+.chat-reaction:hover { background: rgba(255,255,255,.08); }
+.chat-list { max-height: 180px; min-height: 60px; overflow-y: auto; font-size: 0.8rem; display: flex; flex-direction: column; gap: 3px; overflow-wrap: anywhere; }
+.chat-line.system { color: var(--accent-gold); font-style: italic; }
+.chat-emoji { font-size: 1.2rem; }
+.chat-empty { color: var(--text-muted); text-align: center; font-size: 0.75rem; }
+.chat-input-row { display: flex; gap: 6px; }
+.chat-input-row .input { min-width: 0; font-size: 0.8rem; padding: 6px 8px; }
+.btn-xs { font-size: 0.65rem; padding: 3px 8px; border-radius: 6px; }
+
+/* Theme picker */
+.theme-picker { display: flex; gap: 6px; align-items: center; justify-content: center; font-size: 0.65rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .08em; }
+.theme-swatch { width: 18px; height: 18px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
+.theme-swatch.active { border-color: var(--text); }
+
+/* Stats */
+.stats-panel { margin-top: 20px; border-top: 1px solid var(--glass-border); padding-top: 14px; }
+.stats-title { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .08em; font-weight: 700; margin-bottom: 8px; }
+.stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; text-align: center; }
+.stats-row strong { display: block; font-size: 1.1rem; }
+.stats-row span { font-size: 0.65rem; color: var(--text-muted); }
+.stats-history { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 0.75rem; }
+.stats-match { display: grid; grid-template-columns: 1.4fr 1fr 0.8fr 0.6fr; gap: 6px; color: var(--text-dim); }
+.stats-match .win { color: var(--accent-gold); font-weight: 700; }
+
+/* Table layout */
+.table-col { display: flex; flex-direction: column; gap: 10px; }
+.opponents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+
+/* Phones: smaller cards, opponents two-up, and the piles between the
+   opponents and your own cards so a turn needs no scrolling back and forth */
+@media (max-width: 600px) {
+  :root { --card-w: 52px; --card-h: 73px; --card-radius: 8px; }
+  .card-value-tl { font-size: 1rem; }
+  .card-suit-br { font-size: 1.2rem; }
+  .table-col { display: contents; }
+  .opponents-grid { order: 1; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); gap: 6px; --card-w: 38px; --card-h: 53px; }
+  .opponents-grid .card-grid { gap: 4px; }
+  .opponents-grid .card-value-tl { font-size: 0.75rem; }
+  .opponents-grid .card-suit-br { font-size: 0.85rem; }
+  .center-board { display: contents; }
+  .center-board > * { order: 2; }
+  .your-section { order: 3; }
+  .center-board > .chat-panel { order: 4; }
+  .center-board > .theme-picker { order: 5; }
+  .opponents-grid .player-section { padding: 6px; min-width: 0; }
+  .opponents-grid .player-header { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .opponents-grid .player-meta { flex-wrap: wrap; gap: 3px; font-size: 0.6rem; }
+  .opponents-grid .player-name { font-size: 0.75rem; flex-wrap: wrap; overflow-wrap: anywhere; gap: 3px; }
+  .player-header { margin-bottom: 6px; }
+  .player-section .badge { font-size: 0.55rem; padding: 1px 5px; }
+  .opponents-grid .btn-xs { font-size: 0.55rem; padding: 2px 5px; }
+  .your-section { padding: 10px; }
+  .jump-window-bar { margin-bottom: 6px; }
+  .piles-area { flex-direction: row; justify-content: center; padding: 8px; }
+  .board-header { padding: 8px 10px; }
+}

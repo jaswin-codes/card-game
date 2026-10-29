@@ -584,4 +584,13 @@ describe('Timer expiry and jump-in window', () => {
     expect(res.state.players['P1'].cards.length).toBe(0);
     expect(res.state.player_order[res.state.current_player_index]).toBe('P2');
   });
+
+  it('a disconnected player whose turn times out is skipped without a penalty card', () => {
+    const state = createInitialState(['P1', 'P2']);
+    const gone = transition(state, { type: 'DISCONNECT', player_id: 'P1', timestamp: 1 }, 1).state;
+    const res = transition(gone, { type: 'FORCE_TIMER_EXPIRY', timestamp: 2 }, 2);
+    expect(res.state.players['P1'].cards.length).toBe(4);
+    expect(res.state.players['P1'].mistake_count).toBe(0);
+    expect(res.state.player_order[res.state.current_player_index]).toBe('P2');
+  });
 });

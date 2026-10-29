@@ -31,7 +31,7 @@ interface Player {
   id: string;
   name: string;
   cards: Card[];
-  score: number;
+  score: number | null; // hidden (null) until the game ends
   has_called: boolean;
   mistake_count: number;
   connection_status: 'connected' | 'disconnected' | 'eliminated';
@@ -43,6 +43,7 @@ interface PowerState {
   card_id: string;
   power_type: '7_8' | '9_10' | 'J_Q' | 'K';
   player_id: string;
+  k_selection?: { own_position: string; opponent_player_id: string; opponent_position: string };
 }
 
 interface MaskedGameState {
@@ -60,6 +61,7 @@ interface MaskedGameState {
   active_power: PowerState | null;
   turn_timer_start: number | null;
   winner_ids: string[];
+  mistake_log?: { player_id: string; reason: string; timestamp: number }[];
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -95,7 +97,7 @@ function powerInstruction(pt: PowerState['power_type']): string {
     case '7_8':  return 'Click one of your own face-down cards to peek at it briefly.';
     case '9_10': return "Click one of an opponent's face-down cards to peek at it.";
     case 'J_Q':  return 'Select one of YOUR cards, then one OPPONENT card — you will swap them blind.';
-    case 'K':    return 'Select one of YOUR cards and one OPPONENT card — you may then choose to swap or keep info.';
+    case 'K':    return 'Select one of YOUR cards and one OPPONENT card, look at both, then choose whether to swap.';
   }
 }
 
@@ -159,6 +161,129 @@ function GameCard({
   );
 }
 
+interface ChatLine { kind: 'chat' | 'emoji' | 'system'; from: string | null; name: string; spectator: boolean; text: string; ts: number }
+
+const REACTIONS = ['👍', '😂', '😮', '😡', '🔥', '👏', '🤔', '😭'];
+const CHAT_HISTORY = 40;
+
+/** Chat + quick reactions. Text is rendered by React, so it is always escaped. */
+function ChatPanel({ lines, myId, onSend, onReact }: {
+  lines: ChatLine[]; myId: string | null; onSend: (text: string) => void; onReact: (emoji: string) => void;
+}) {
+  const [draft, setDraft] = useState('');
+  const listRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { listRef.current?.scrollTo(0, listRef.current.scrollHeight); }, [lines]);
+
+  const submit = () => {
+    const text = draft.trim();
+    if (!text) return;
+    onSend(text);
+    setDraft('');
+  };
+
+  return (
+    <div className="glass chat-panel">
+      <div className="chat-reactions">
+        {REACTIONS.map(e => (
+          <button key={e} className="chat-reaction" onClick={() => onReact(e)} aria-label={`React ${e}`}>{e}</button>
+        ))}
+      </div>
+      <div className="chat-list" ref={listRef} aria-live="polite">
+        {lines.length === 0 && <div className="chat-empty">No messages yet</div>}
+        {lines.map((l, i) => (
+          <div key={i} className={`chat-line ${l.kind}`}>
+            {l.kind !== 'system' && <strong>{l.from === myId ? 'You' : l.name}{l.spectator ? ' 👁' : ''}: </strong>}
+            <span className={l.kind === 'emoji' ? 'chat-emoji' : ''}>{l.text}</span>
+          </div>
+        ))}
+      </div>
+      <div className="chat-input-row">
+        <input className="input" maxLength={200} placeholder="Say something…" value={draft}
+          onChange={e => setDraft(e.target.value)} onKeyDown={e => e.key === 'Enter' && submit()} aria-label="Chat message" />
+        <button className="btn btn-ghost" onClick={submit} disabled={!draft.trim()}>Send</button>
+      </div>
+    </div>
+  );
+}
+
+const THEMES = [
+  { id: 'midnight', label: 'Midnight', swatch: '#6366f1' },
+  { id: 'felt',     label: 'Felt',     swatch: '#16a34a' },
+  { id: 'crimson',  label: 'Crimson',  swatch: '#dc2626' },
+  { id: 'ocean',    label: 'Ocean',    swatch: '#0ea5e9' },
+];
+
+// localStorage can throw (private mode, blocked storage); the game works without it
+function readStored(key: string): string | null {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+function writeStored(key: string, value: string) {
+  try { localStorage.setItem(key, value); } catch { /* not saved */ }
+}
+function removeStored(key: string) {
+  try { localStorage.removeItem(key); } catch { /* nothing stored */ }
+}
+
+// Stats live in this browser only: the server keeps no database
+interface MatchRecord { at: number; players: number; score: number; won: boolean; called: boolean }
+interface Stats { games: number; wins: number; totalScore: number; history: MatchRecord[] }
+const STATS_KEY = 'cg_stats';
+const HISTORY_SIZE = 20;
+
+function loadStats(): Stats {
+  try {
+    const s = JSON.parse(readStored(STATS_KEY) ?? '');
+    if (typeof s?.games === 'number' && Array.isArray(s.history)) return s;
+  } catch { /* missing or corrupt: start fresh */ }
+  return { games: 0, wins: 0, totalScore: 0, history: [] };
+}
+
+function addMatch(stats: Stats, m: MatchRecord): Stats {
+  return {
+    games: stats.games + 1,
+    wins: stats.wins + (m.won ? 1 : 0),
+    totalScore: stats.totalScore + m.score,
+    history: [m, ...stats.history].slice(0, HISTORY_SIZE),
+  };
+}
+
+function StatsPanel({ stats }: { stats: Stats }) {
+  if (stats.games === 0) return null;
+  return (
+    <div className="stats-panel">
+      <div className="stats-title">Your stats (this browser)</div>
+      <div className="stats-row">
+        <div><strong>{stats.games}</strong><span>games</span></div>
+        <div><strong>{stats.wins}</strong><span>wins</span></div>
+        <div><strong>{Math.round((stats.wins / stats.games) * 100)}%</strong><span>win rate</span></div>
+        <div><strong>{(stats.totalScore / stats.games).toFixed(1)}</strong><span>avg pts</span></div>
+      </div>
+      <div className="stats-history">
+        {stats.history.slice(0, 5).map(m => (
+          <div key={m.at} className="stats-match">
+            <span>{new Date(m.at).toLocaleDateString()}</span>
+            <span>{m.players}p{m.called ? ' · called' : ''}</span>
+            <span>{m.score} pts</span>
+            <span className={m.won ? 'win' : ''}>{m.won ? 'Won' : 'Lost'}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ThemePicker({ theme, onChange }: { theme: string; onChange: (t: string) => void }) {
+  return (
+    <div className="theme-picker">
+      Theme
+      {THEMES.map(t => (
+        <button key={t.id} className={`theme-swatch ${theme === t.id ? 'active' : ''}`} style={{ background: t.swatch }}
+          onClick={() => onChange(t.id)} title={t.label} aria-label={`${t.label} theme`} aria-pressed={theme === t.id} />
+      ))}
+    </div>
+  );
+}
+
 /** Toast notification */
 function Toast({ msg, kind }: { msg: string; kind: 'error'|'info'|'success' }) {
   return <div className={`toast ${kind}`}>{msg}</div>;
@@ -188,6 +313,15 @@ export default function App() {
   const [selectedOpp,      setSelectedOpp]      = useState<{pid:string;pos:string}|null>(null);
   const [discardClickMode, setDiscardClickMode] = useState(false); // waiting for own card to swap with discard
   const [jumpMode,         setJumpMode]         = useState<'own'|'opp'|null>(null); // armed jump-in type
+  const [chat,             setChat]             = useState<ChatLine[]>([]);
+  const [theme,            setTheme]            = useState(() => readStored('cg_theme') ?? 'midnight');
+  const [stats,            setStats]            = useState<Stats>(loadStats);
+  const lastStatusRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    writeStored('cg_theme', theme);
+  }, [theme]);
   const [peekPositions,    setPeekPositions]    = useState<Set<string>>(new Set()); // "{playerId}:{pos}" currently peeking
   const [reconnCountdown,  setReconnCountdown]  = useState(300);
 
@@ -197,6 +331,10 @@ export default function App() {
   const reconnTimerRef     = useRef<any>(null);
   const toastTimerRef      = useRef<any>(null);
   const turnKeyRef         = useRef<string>(''); // "{player index}:{phase}" of last state
+  const mistakeCountRef    = useRef<number | null>(null); // timestamp of the last announced penalty
+  const myIdRef            = useRef<string | null>(null); // myId for the socket handler, which outlives renders
+
+  myIdRef.current = myId;
 
   // ── derived
   const activePlayerId = gs ? gs.player_order[gs.current_player_index] : null;
@@ -216,6 +354,25 @@ export default function App() {
     timerIntervalRef.current = setInterval(tick, 500);
     return () => clearInterval(timerIntervalRef.current);
   }, [gs]);
+
+  // ─── Record a finished match once, when this client sees the game end
+  useEffect(() => {
+    const status = gs?.status ?? null;
+    const prev = lastStatusRef.current;
+    lastStatusRef.current = status;
+    if (status !== 'ended' || !prev || prev === 'ended' || !gs || !myId || isSpectator) return;
+    const me = gs.players[myId];
+    if (!me || me.score === null) return;
+    const next = addMatch(loadStats(), {
+      at: Date.now(),
+      players: gs.player_order.length,
+      score: me.score,
+      won: gs.winner_ids.includes(myId),
+      called: gs.caller_id === myId,
+    });
+    writeStored(STATS_KEY, JSON.stringify(next));
+    setStats(next);
+  }, [gs, myId, isSpectator]);
 
   // ─── Reconnect timer
   useEffect(() => {
@@ -255,9 +412,9 @@ export default function App() {
         setMyId(data.playerId);
         setHostId(data.playerId);
         setLobbyPlayers(data.players ?? []);
-        localStorage.setItem('cg_token',  data.token);
-        localStorage.setItem('cg_room',   data.roomId);
-        localStorage.setItem('cg_player', data.playerId);
+        writeStored('cg_token',  data.token);
+        writeStored('cg_room',   data.roomId);
+        writeStored('cg_player', data.playerId);
         break;
 
       case 'ROOM_JOINED':
@@ -267,9 +424,9 @@ export default function App() {
         setIsSpectator(data.isSpectator ?? false);
         setLobbyPlayers(data.players ?? []);
         setHostId(data.players?.[0]?.id ?? null);
-        localStorage.setItem('cg_token',  data.token);
-        localStorage.setItem('cg_room',   data.roomId);
-        localStorage.setItem('cg_player', data.playerId);
+        writeStored('cg_token',  data.token);
+        writeStored('cg_room',   data.roomId);
+        writeStored('cg_player', data.playerId);
         break;
 
       case 'RECONNECTED':
@@ -297,16 +454,30 @@ export default function App() {
           setDiscardClickMode(false);
         }
         if (!newGs?.jump_in_window_open) setJumpMode(null);
+
+        // Announce new penalties to everyone (skipped on the first state after joining)
+        const log = newGs?.mistake_log ?? [];
+        const latest = log[log.length - 1];
+        const seen = mistakeCountRef.current;
+        if (seen !== null && latest && latest.timestamp > seen) {
+          const who = latest.player_id === myIdRef.current ? 'You' : newGs!.players[latest.player_id]?.name ?? 'Someone';
+          showToast(`Penalty — ${who}: ${latest.reason} (+1 card)`, 'error');
+        }
+        mistakeCountRef.current = latest?.timestamp ?? 0;
         break;
       }
 
       case 'RECONNECT_FAILED':
-        localStorage.removeItem('cg_token');
-        localStorage.removeItem('cg_room');
-        localStorage.removeItem('cg_player');
+        removeStored('cg_token');
+        removeStored('cg_room');
+        removeStored('cg_player');
         wsRef.current?.close();
         setJoinedRoom(null); setMyId(null); setToken(null); setGs(null);
         showToast(data.error ?? 'Could not rejoin room', 'error');
+        break;
+
+      case 'CHAT':
+        setChat(prev => [...prev, data as ChatLine].slice(-CHAT_HISTORY));
         break;
 
       case 'ACTION_FAILED':
@@ -333,9 +504,9 @@ export default function App() {
 
   // ─── Session restore on mount
   useEffect(() => {
-    const tok = localStorage.getItem('cg_token');
-    const rm  = localStorage.getItem('cg_room');
-    const pid = localStorage.getItem('cg_player');
+    const tok = readStored('cg_token');
+    const rm  = readStored('cg_room');
+    const pid = readStored('cg_player');
     if (tok && rm && pid) {
       setToken(tok); setJoinedRoom(rm); setMyId(pid);
       openWs(ws => ws.send(JSON.stringify({ type: 'RECONNECT', roomId: rm, playerId: pid, token: tok })));
@@ -368,14 +539,19 @@ export default function App() {
   };
 
   const startGame = () => send({ type: 'START_GAME' });
+  const chatPanel = (
+    <ChatPanel lines={chat} myId={myId}
+      onSend={text => send({ type: 'CHAT', text })}
+      onReact={emoji => send({ type: 'REACTION', emoji })} />
+  );
 
   const handleLeave = () => {
-    localStorage.removeItem('cg_token');
-    localStorage.removeItem('cg_room');
-    localStorage.removeItem('cg_player');
+    removeStored('cg_token');
+    removeStored('cg_room');
+    removeStored('cg_player');
     wsRef.current?.close();
     setJoinedRoom(null); setMyId(null); setToken(null);
-    setGs(null); setConnState('disconnected');
+    setGs(null); setConnState('disconnected'); setChat([]);
   };
 
   // ─── Card click dispatcher
@@ -397,7 +573,7 @@ export default function App() {
       if (jumpMode === 'own') {
         // Type 1: discard your own matching card
         if (!isMine) { showToast('Click one of YOUR cards that matches the discard', 'info'); return; }
-        sendAction({ type: 'JUMP_IN_TYPE_1', card_position: card.position });
+        sendAction({ type: 'JUMP_IN_TYPE_1', card_position: card.position, expected_discard_id: gs.last_discard_card?.id });
         setJumpMode(null);
         return;
       }
@@ -413,6 +589,8 @@ export default function App() {
         opponent_player_id: selectedOpp.pid,
         opponent_position: selectedOpp.pos,
         own_position: card.position,
+        // Real id of the card you know is there, so a lost race isn't penalised
+        expected_opponent_card_id: gs.players[selectedOpp.pid]?.cards.find(c => c.position === selectedOpp.pos)?.id,
       });
       setSelectedOpp(null);
       setJumpMode(null);
@@ -446,10 +624,10 @@ export default function App() {
         triggerPeek(ownerId, card.position);
         return;
       }
-      if ((power === 'J_Q' || power === 'K')) {
-        if (isMine && !selectedOwn) { setSelectedOwn(card.position); return; }
-        if (!isMine && selectedOwn) { setSelectedOpp({ pid: ownerId, pos: card.position }); return; }
-        if (isMine)  { setSelectedOwn(card.position); return; }
+      if ((power === 'J_Q' || power === 'K') && !gs.active_power?.k_selection) {
+        if (isMine) setSelectedOwn(card.position);
+        else setSelectedOpp({ pid: ownerId, pos: card.position });
+        return;
       }
     }
   }, [gs, isSpectator, myId, isMyTurn, discardClickMode, jumpMode, selectedOwn, selectedOpp, sendAction, showToast, triggerPeek]);
@@ -466,9 +644,14 @@ export default function App() {
     if (!selectedOwn || !selectedOpp) return;
     sendAction({ type: 'RESOLVE_POWER_J_Q', own_position: selectedOwn, opponent_player_id: selectedOpp.pid, opponent_position: selectedOpp.pos });
   };
-  const confirmK = (doSwap: boolean) => {
+  const lookK = () => {
     if (!selectedOwn || !selectedOpp) return;
-    sendAction({ type: 'RESOLVE_POWER_K', own_position: selectedOwn, opponent_player_id: selectedOpp.pid, opponent_position: selectedOpp.pos, should_swap: doSwap });
+    sendAction({ type: 'RESOLVE_POWER_K_LOOK', own_position: selectedOwn, opponent_player_id: selectedOpp.pid, opponent_position: selectedOpp.pos });
+  };
+  const confirmK = (doSwap: boolean) => {
+    const sel = gs?.active_power?.k_selection;
+    if (!sel) return;
+    sendAction({ type: 'RESOLVE_POWER_K', ...sel, should_swap: doSwap });
   };
 
   // ─── Render a player's card grid ─────────────────────────
@@ -555,6 +738,7 @@ export default function App() {
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', letterSpacing: '.2em', textTransform: 'uppercase' }}>
               Card Game
             </div>
+            <div style={{ marginTop: 10 }}><ThemePicker theme={theme} onChange={setTheme} /></div>
           </div>
 
           {!joinedRoom && (<>
@@ -597,6 +781,7 @@ export default function App() {
           <button className="btn btn-purple w-full" onClick={() => joinRoom(true)} disabled={!playerName.trim() || !roomCode.trim()}>
             👁 Spectate
           </button>
+          <StatsPanel stats={stats} />
           </>)}
 
           {/* Waiting lobby players */}
@@ -622,6 +807,7 @@ export default function App() {
                 <div className="action-hint" style={{ marginTop: 12 }}>Waiting for the host to start the match…</div>
               )}
               <button className="btn btn-ghost w-full" style={{ marginTop: 8 }} onClick={handleLeave}>Leave Lobby</button>
+              <div style={{ marginTop: 16 }}>{chatPanel}</div>
             </div>
           )}
         </div>
@@ -633,7 +819,7 @@ export default function App() {
   if (gs.status === 'ended') {
     const sorted = gs.player_order
       .map(id => gs.players[id])
-      .sort((a, b) => a.score - b.score);
+      .sort((a, b) => (a.score ?? 0) - (b.score ?? 0));
 
     return (
       <div className="screen-center">
@@ -742,10 +928,10 @@ export default function App() {
       {/* ── Main area ── */}
       <div className="game-area">
         {/* Left: opponents + my grid */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div className="table-col">
 
           {/* Opponents */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 10 }}>
+          <div className="opponents-grid">
             {opponents.map(p => {
               const isActive  = p.id === activePlayerId;
               const isCaller  = p.id === gs.caller_id;
@@ -764,6 +950,12 @@ export default function App() {
                       <span>{p.cards.length} cards</span>
                       {p.mistake_count > 0 && <span className="badge badge-red">{p.mistake_count} mistakes</span>}
                       {p.connection_status !== 'connected' && <span className="badge badge-muted">{p.connection_status}</span>}
+                      {!isSpectator && p.connection_status !== 'eliminated' && (
+                        <button className="btn btn-ghost btn-xs" onClick={() => send({ type: 'REPORT_MISTAKE', accused_id: p.id })}
+                          title="Ask the server to check this player's last move">
+                          Call Mistake
+                        </button>
+                      )}
                     </div>
                   </div>
                   {renderGrid(p)}
@@ -945,15 +1137,22 @@ export default function App() {
                     {power === 'J_Q' && selectedOwn && selectedOpp && (
                       <button className="btn btn-primary w-full" onClick={confirmJQ}>Confirm Blind Swap</button>
                     )}
-                    {power === 'K' && selectedOwn && selectedOpp && (
+                    {power === 'K' && !gs.active_power.k_selection && selectedOwn && selectedOpp && (
+                      <button className="btn btn-primary w-full" onClick={lookK}>Look at Both Cards</button>
+                    )}
+                    {power === 'K' && gs.active_power.k_selection && (
                       <div style={{ display: 'flex', gap: 8 }}>
-                        <button className="btn btn-ghost grow" onClick={() => confirmK(false)}>Peek Only</button>
-                        <button className="btn btn-primary grow" onClick={() => confirmK(true)}>Peek &amp; Swap</button>
+                        <button className="btn btn-ghost grow" onClick={() => confirmK(false)}>Keep</button>
+                        <button className="btn btn-primary grow" onClick={() => confirmK(true)}>Swap</button>
                       </div>
                     )}
+                    <button className="btn btn-ghost w-full" style={{ fontSize: '0.75rem' }}
+                      onClick={() => sendAction({ type: 'SKIP_POWER' })}>
+                      Skip Power
+                    </button>
 
                     <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
-                      {(power === 'J_Q' || power === 'K') && (selectedOwn || selectedOpp) && (
+                      {(power === 'J_Q' || power === 'K') && !gs.active_power.k_selection && (selectedOwn || selectedOpp) && (
                         <button className="btn btn-danger" style={{ fontSize: '0.75rem', padding: '6px 12px' }}
                           onClick={() => { setSelectedOwn(null); setSelectedOpp(null); }}>
                           Clear Selection
@@ -983,6 +1182,8 @@ export default function App() {
               </div>
             )}
           </div>
+          {chatPanel}
+          <ThemePicker theme={theme} onChange={setTheme} />
         </div>
       </div>
     </div>
