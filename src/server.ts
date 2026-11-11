@@ -126,7 +126,7 @@ const server = createServer((req, res) => {
     let filePath = path.normalize(path.join(CLIENT_DIST, urlPath));
 
     // Path traversal guard
-    if (!filePath.startsWith(CLIENT_DIST)) {
+    if (filePath !== CLIENT_DIST && !filePath.startsWith(CLIENT_DIST + path.sep)) {
       res.writeHead(403).end('Forbidden');
       return;
     }
@@ -267,6 +267,11 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
 
   switch (message.type) {
     case 'CREATE_ROOM': {
+      // One socket holds one seat; otherwise a single connection can create rooms and sessions without limit.
+      if (clientSession.session) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'Already in a room' }));
+        return;
+      }
       const roomId = crypto.randomBytes(3).toString('hex').toUpperCase(); // 6 character room code
       const playerId = crypto.randomUUID();
       const token = crypto.randomUUID();
@@ -309,6 +314,11 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
     }
 
     case 'JOIN_ROOM': {
+      // One socket holds one seat; otherwise a single connection can create rooms and sessions without limit.
+      if (clientSession.session) {
+        ws.send(JSON.stringify({ type: 'ERROR', error: 'Already in a room' }));
+        return;
+      }
       const { playerName, isSpectator } = message;
       const roomId = typeof message.roomId === 'string' ? message.roomId.trim().toUpperCase() : '';
       const room = rooms[roomId];
@@ -452,7 +462,7 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
         return;
       }
 
-      const text = message.type === 'CHAT' && typeof message.text === 'string' ? message.text.trim() : message.emoji;
+      const text = message.type === 'CHAT' ? (typeof message.text === 'string' ? message.text.trim() : '') : message.emoji;
       if (message.type === 'CHAT' && (!text || text.length > CHAT_MAX_LENGTH)) {
         ws.send(JSON.stringify({ type: 'ERROR', error: `Messages must be 1–${CHAT_MAX_LENGTH} characters` }));
         return;
@@ -511,7 +521,7 @@ function _handleMessage(ws: WebSocket, data: string, clientSession: { session: S
       const room = rooms[roomId];
       const session = sessions[token];
 
-      if (!room || !session || session.playerId !== playerId) {
+      if (!room || !session || session.playerId !== playerId || session.roomId !== roomId) {
         ws.send(JSON.stringify({ type: 'RECONNECT_FAILED', error: 'Session expired — please join again' }));
         return;
       }
