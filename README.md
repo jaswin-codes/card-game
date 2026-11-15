@@ -31,6 +31,15 @@ Card values: number cards are face value, Ace 1, J/Q/black K 10, **red K 0, Joke
 
 Also in the game: chat and emoji reactions, a **Call Mistake** button that asks the server to check another player's last move, four background themes, and stats and match history saved in your browser.
 
+## Feedback and bugs
+
+Tried it with friends? I'd love to hear what was confusing or broken:
+[open an issue](https://github.com/jaswin-codes/card-game/issues/new/choose) (bug report or feedback form). Pull requests are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Privacy
+
+There are no accounts and no database. Your name, stats and match history are stored only in your own browser (`localStorage`). Games and chat live in server memory and are discarded when a room closes or the server restarts. No analytics or tracking are used.
+
 ## Run it locally
 
 Needs Node.js 20.19 or newer.
@@ -70,3 +79,7 @@ render.yaml       Render deployment (free web service)
 ## Deploying
 
 Pushing to `main` redeploys on Render through `render.yaml`. The free plan sleeps after about 15 minutes idle, so the first visit can take up to a minute.
+
+## License
+
+[MIT](LICENSE) © 2026 Jaswin Chinthala. Development notes from building the game are in [docs/dev-notes](docs/dev-notes).

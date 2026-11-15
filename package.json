@@ -15,8 +15,8 @@
     "dev:client": "npm --prefix client run dev"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "Jaswin Chinthala",
+  "license": "MIT",
   "engines": {
     "node": ">=20.19"
   },
